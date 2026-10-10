@@ -1,0 +1,35 @@
+# Cabeceras de seguridad para Apache/LiteSpeed (Hostinger). La CSP principal va en index.html;
+# aquí solo lo que una etiqueta <meta> no puede hacer.
+
+# Forzar HTTPS (necesario para instalar la app, la cámara y el cifrado del navegador)
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTPS} !=on
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+</IfModule>
+
+<IfModule mod_headers.c>
+  Header always set Content-Security-Policy "frame-ancestors 'none'"
+  Header always set X-Frame-Options "DENY"
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set Referrer-Policy "no-referrer"
+  Header always set Cross-Origin-Opener-Policy "same-origin"
+  Header always set Cross-Origin-Resource-Policy "same-origin"
+  Header always set X-Permitted-Cross-Domain-Policies "none"
+  Header always set Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), bluetooth=(), midi=(), display-capture=(), browsing-topics=()"
+  Header always set Strict-Transport-Security "max-age=31536000"
+
+  # El service worker y la página deben comprobarse siempre para detectar versiones nuevas.
+  <FilesMatch "^(sw\.js|index\.html|manifest\.webmanifest)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
+
+# Por si se sube la carpeta del proyecto entera por error.
+<FilesMatch "^(README\.md|_headers)$">
+  Require all denied
+</FilesMatch>
+
+AddType application/manifest+json .webmanifest
+AddType application/javascript .js
+Options -Indexes

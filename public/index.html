@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' wss:; manifest-src 'self'; worker-src 'self'; media-src 'self' blob: mediastream:; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types susurro">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121a1d" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Chat cifrado con PGP, descentralizado y sin cuentas.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Susurro">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <title>Susurro</title>
+  <script src="vendor/openpgp.min.js" defer></script>
+  <script src="vendor/nostr.bundle.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <svg hidden aria-hidden="true">
+    <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM21 14v.01M14 21h.01M17 21h4v-4"/></symbol>
+    <symbol id="i-add" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4 20-7z"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+    <symbol id="i-timer" viewBox="0 0 24 24"><path d="M10 2h4M12 14l3-3"/><circle cx="12" cy="14" r="8"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="m16 6-4-4-4 4M12 2v13"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  </svg>
+
+  <div id="boot" class="boot">
+    <img src="icons/icon.svg" alt="" width="64" height="64">
+    <p id="boot-msg"></p>
+    <button class="btn primary" id="btn-reload" type="button" hidden>Usar aquí</button>
+  </div>
+
+  <!-- Bienvenida: crear identidad o restaurar -->
+  <main id="welcome" class="welcome" hidden>
+    <div class="welcome-card">
+      <img class="logo" src="icons/icon.svg" alt="" width="72" height="72">
+      <h1>Susurro</h1>
+      <p class="lead">Chat cifrado con PGP. Sin cuentas, sin número de teléfono y sin servidor central.</p>
+      <ul class="features">
+        <li><svg class="ic"><use href="#i-lock"/></svg><span>Cifrado de extremo a extremo con OpenPGP</span></li>
+        <li><svg class="ic"><use href="#i-globe"/></svg><span>Descentralizado: viaja por varios relays Nostr a la vez</span></li>
+        <li><svg class="ic"><use href="#i-key"/></svg><span>Tu clave privada no se envía a ningún servidor</span></li>
+      </ul>
+
+      <div id="invite-note" class="note" hidden>
+        <p>Te han invitado a chatear. Crea tu identidad para continuar.</p>
+        <div id="invite-ios" hidden>
+          <p>¿Ya tienes Susurro instalado en el iPhone? Copia el enlace, abre la app y pégalo en «Añadir contacto».</p>
+          <button class="btn small" id="btn-copy-invite" type="button">Copiar enlace</button>
+        </div>
+      </div>
+      <p id="install-hint-ios" class="note" hidden>En iPhone, instálala primero: toca <b>Compartir</b> y después <b>Añadir a pantalla de inicio</b>. Luego ábrela desde el icono.</p>
+
+      <form id="form-create" class="stack">
+        <label for="in-name">¿Cómo quieres que te vean?</label>
+        <input id="in-name" maxlength="40" autocomplete="nickname" placeholder="Tu nombre o apodo" required>
+        <label for="in-create-pass">Contraseña para abrir Susurro</label>
+        <input id="in-create-pass" type="password" minlength="8" autocomplete="new-password" placeholder="Mínimo 8 caracteres" required>
+        <input id="in-create-pass2" type="password" minlength="8" autocomplete="new-password" placeholder="Repite la contraseña" required aria-label="Repite la contraseña">
+        <p class="fine left">Cifra todo lo que Susurro guarda en este dispositivo. Si la olvidas, solo podrás recuperar tu cuenta con una copia de seguridad.</p>
+        <p id="create-error" class="error" hidden></p>
+        <button class="btn primary" type="submit">Crear mi identidad</button>
+      </form>
+
+      <button id="btn-install-welcome" class="btn ghost" type="button" hidden><svg class="ic"><use href="#i-download"/></svg> Instalar la app</button>
+
+      <details class="restore">
+        <summary>Restaurar copia o importar clave PGP</summary>
+        <form id="form-restore" class="stack">
+          <label class="btn file-btn"><input type="file" id="in-restore-file" accept=".asc,.txt,.gpg,.pgp,.json,text/plain">Elegir archivo…</label>
+          <textarea id="in-restore-text" rows="4" spellcheck="false" placeholder="…o pega aquí la copia de seguridad o tu clave privada PGP"></textarea>
+          <input id="in-restore-pass" type="password" placeholder="Contraseña de la copia (si tiene)" autocomplete="current-password">
+          <p id="restore-error" class="error" hidden></p>
+          <button class="btn" type="submit">Restaurar</button>
+        </form>
+      </details>
+      <p class="fine">Las claves se generan en tu dispositivo. Nadie más puede leer tus mensajes.</p>
+    </div>
+  </main>
+
+  <!-- Bloqueo: los datos están cifrados con la contraseña de acceso -->
+  <main id="lock" class="welcome" hidden>
+    <div class="welcome-card">
+      <img class="logo" src="icons/icon.svg" alt="" width="72" height="72">
+      <h1>Susurro está bloqueado</h1>
+      <form id="form-unlock" class="stack">
+        <label for="in-unlock">Contraseña</label>
+        <input id="in-unlock" type="password" autocomplete="current-password" required>
+        <p id="unlock-error" class="error" hidden></p>
+        <button class="btn primary" type="submit">Desbloquear</button>
+      </form>
+      <button class="btn ghost" id="btn-forgot" type="button">¿Has olvidado la contraseña?</button>
+    </div>
+  </main>
+
+  <!-- Crear contraseña tras restaurar o al actualizar desde una versión sin contraseña -->
+  <main id="setpass" class="welcome" hidden>
+    <div class="welcome-card">
+      <img class="logo" src="icons/icon.svg" alt="" width="72" height="72">
+      <h1>Protege Susurro</h1>
+      <p class="lead" id="setpass-lead"></p>
+      <form id="form-setpass" class="stack">
+        <label for="in-setpass">Contraseña para abrir Susurro</label>
+        <input id="in-setpass" type="password" minlength="8" autocomplete="new-password" placeholder="Mínimo 8 caracteres" required>
+        <input id="in-setpass2" type="password" minlength="8" autocomplete="new-password" placeholder="Repite la contraseña" required aria-label="Repite la contraseña">
+        <p class="fine left">Si la olvidas, solo podrás recuperar tu cuenta con una copia de seguridad.</p>
+        <p id="setpass-error" class="error" hidden></p>
+        <button class="btn primary" type="submit">Guardar contraseña</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- App -->
+  <div id="app" class="app" hidden>
+    <aside class="sidebar">
+      <header class="bar">
+        <div class="bar-title">
+          <strong>Susurro</strong>
+          <span id="net" class="net"><i></i><span>Conectando…</span></span>
+        </div>
+        <button class="icon-btn" id="btn-share" type="button" title="Mi código" aria-label="Mi código"><svg class="ic"><use href="#i-qr"/></svg></button>
+        <button class="icon-btn" id="btn-add" type="button" title="Añadir contacto" aria-label="Añadir contacto"><svg class="ic"><use href="#i-add"/></svg></button>
+        <button class="icon-btn" id="btn-lock" type="button" title="Bloquear" aria-label="Bloquear"><svg class="ic"><use href="#i-lock"/></svg></button>
+        <button class="icon-btn" id="btn-settings" type="button" title="Ajustes" aria-label="Ajustes"><svg class="ic"><use href="#i-gear"/></svg></button>
+      </header>
+      <div id="update-banner" class="banner" hidden>
+        <span>Hay una versión nueva de Susurro.</span>
+        <button class="btn small primary" id="btn-update" type="button">Actualizar</button>
+      </div>
+      <div id="install-banner" class="banner" hidden>
+        <span id="install-text"></span>
+        <button class="btn small primary" id="btn-install" type="button">Instalar</button>
+        <button class="icon-btn small" id="btn-install-close" type="button" aria-label="Cerrar aviso"><svg class="ic"><use href="#i-x"/></svg></button>
+      </div>
+      <ul id="chat-list" class="chat-list"></ul>
+      <div id="list-empty" class="empty" hidden>
+        <p><strong>Aún no tienes chats</strong></p>
+        <p>Enseña tu código QR a alguien o escanea el suyo para empezar.</p>
+        <button class="btn primary" id="btn-empty-share" type="button"><svg class="ic"><use href="#i-qr"/></svg> Mi código</button>
+        <button class="btn" id="btn-empty-add" type="button"><svg class="ic"><use href="#i-scan"/></svg> Añadir contacto</button>
+      </div>
+    </aside>
+
+    <section class="chat">
+      <div id="chat-none" class="chat-placeholder"><p>Elige un chat o añade un contacto.</p></div>
+      <header id="chat-bar" class="bar" hidden>
+        <button class="icon-btn back" id="btn-back" type="button" aria-label="Volver"><svg class="ic"><use href="#i-back"/></svg></button>
+        <button class="chat-who" id="btn-who" type="button">
+          <span class="avatar sm" id="chat-avatar"></span>
+          <span class="who-text"><strong id="chat-name"></strong><small id="chat-sub"></small></span>
+        </button>
+        <button class="icon-btn timer-btn" id="btn-timer" type="button" title="Mensajes temporales" aria-label="Mensajes temporales"><svg class="ic"><use href="#i-timer"/></svg></button>
+      </header>
+      <div id="request" class="request" hidden>
+        <p><strong id="req-name"></strong> quiere chatear contigo. Aún no está en tus contactos. Huella: <code id="req-fpr" class="fpr-inline"></code></p>
+        <p id="req-warn" class="warn" hidden>Ojo: ya tienes otro contacto con un nombre que se ve igual. Puede ser alguien haciéndose pasar por esa persona: comprueba la huella antes de aceptar.</p>
+        <div class="row">
+          <button class="btn small primary" id="btn-accept" type="button">Aceptar</button>
+          <button class="btn small danger" id="btn-block" type="button">Bloquear</button>
+        </div>
+      </div>
+      <div id="messages" class="messages" aria-live="polite" hidden></div>
+      <form id="composer" class="composer" hidden>
+        <textarea id="in-msg" rows="1" maxlength="8000" placeholder="Mensaje cifrado" aria-label="Mensaje"></textarea>
+        <button class="send" id="btn-send" type="submit" aria-label="Enviar"><svg class="ic"><use href="#i-send"/></svg></button>
+      </form>
+    </section>
+  </div>
+
+  <!-- Mi código -->
+  <dialog id="dlg-share" class="sheet">
+    <header><h2>Mi código</h2><button class="icon-btn" data-close type="button" aria-label="Cerrar"><svg class="ic"><use href="#i-x"/></svg></button></header>
+    <div class="sheet-body">
+      <p class="muted">Que la otra persona lo escanee con la cámara del móvil o desde «Añadir contacto».</p>
+      <canvas id="qr" class="qr" width="300" height="300" aria-label="Código QR con tu clave pública"></canvas>
+      <p class="fpr-label">Tu huella</p>
+      <code id="my-fpr" class="fpr"></code>
+      <button class="btn primary" id="btn-share-link" type="button"><svg class="ic"><use href="#i-share"/></svg> Compartir enlace</button>
+      <button class="btn" id="btn-copy-link" type="button"><svg class="ic"><use href="#i-copy"/></svg> Copiar enlace</button>
+      <button class="btn ghost" id="btn-copy-pgp" type="button">Copiar clave pública PGP</button>
+    </div>
+  </dialog>
+
+  <!-- Añadir contacto -->
+  <dialog id="dlg-add" class="sheet">
+    <header><h2>Añadir contacto</h2><button class="icon-btn" data-close type="button" aria-label="Cerrar"><svg class="ic"><use href="#i-x"/></svg></button></header>
+    <div class="sheet-body">
+      <div id="scan-box" class="scan" hidden><video id="scan-video" playsinline muted></video><div class="scan-frame"></div></div>
+      <button class="btn primary" id="btn-scan" type="button"><svg class="ic"><use href="#i-scan"/></svg> <span>Escanear código QR</span></button>
+      <p class="or"><span>o</span></p>
+      <textarea id="in-contact" rows="3" spellcheck="false" placeholder="Pega aquí su enlace o su clave pública PGP"></textarea>
+      <div id="contact-preview" class="preview" hidden>
+        <span class="avatar" id="cp-avatar"></span>
+        <div><strong id="cp-name"></strong><code class="fpr small" id="cp-fpr"></code></div>
+      </div>
+      <p id="contact-warn" class="warn" hidden>Ya tienes otro contacto con un nombre que se ve igual. Comprueba la huella.</p>
+      <p id="contact-error" class="error" hidden></p>
+      <button class="btn primary" id="btn-add-confirm" type="button" disabled>Añadir</button>
+    </div>
+  </dialog>
+
+  <!-- Ficha del contacto / verificación -->
+  <dialog id="dlg-contact" class="sheet">
+    <header><h2 id="ct-name"></h2><button class="icon-btn" data-close type="button" aria-label="Cerrar"><svg class="ic"><use href="#i-x"/></svg></button></header>
+    <div class="sheet-body">
+      <p class="muted">Comparad las huellas en persona o por otra vía (una llamada, otra app). Si coinciden, nadie se está haciendo pasar por esta persona.</p>
+      <p class="fpr-label">Su huella</p>
+      <code id="ct-fpr" class="fpr"></code>
+      <p class="fpr-label">Tu huella</p>
+      <code id="ct-myfpr" class="fpr"></code>
+      <button class="btn" id="btn-ct-verify" type="button"><svg class="ic"><use href="#i-shield"/></svg> <span>Marcar como verificado</span></button>
+      <button class="btn ghost" id="btn-ct-copy" type="button">Copiar su clave pública PGP</button>
+      <button class="btn danger" id="btn-ct-delete" type="button">Eliminar chat y contacto</button>
+    </div>
+  </dialog>
+
+  <!-- Mensajes temporales -->
+  <dialog id="dlg-timer" class="sheet">
+    <header><h2>Mensajes temporales</h2><button class="icon-btn" data-close type="button" aria-label="Cerrar"><svg class="ic"><use href="#i-x"/></svg></button></header>
+    <div class="sheet-body">
+      <p class="muted">Los mensajes nuevos de este chat desaparecerán de los dos dispositivos pasado ese tiempo desde que se envían, y los relays también los borrarán. El cambio se aplica a los dos.</p>
+      <div id="timer-options" class="stack"></div>
+      <p class="fine left">Nadie puede impedir que la otra persona haga una captura de pantalla.</p>
+    </div>
+  </dialog>
+
+  <!-- Ajustes -->
+  <dialog id="dlg-settings" class="sheet">
+    <header><h2>Ajustes</h2><button class="icon-btn" data-close type="button" aria-label="Cerrar"><svg class="ic"><use href="#i-x"/></svg></button></header>
+    <div class="sheet-body">
+      <section>
+        <h3>Tu identidad</h3>
+        <p><strong id="set-name"></strong></p>
+        <code id="set-fpr" class="fpr"></code>
+      </section>
+      <section>
+        <h3>Contraseña de acceso</h3>
+        <p class="muted">Cifra todo lo guardado en este dispositivo. Susurro se bloquea solo tras 5 minutos en segundo plano.</p>
+        <form id="form-pass" class="stack">
+          <input type="password" id="in-pass-old" autocomplete="current-password" placeholder="Contraseña actual" required aria-label="Contraseña actual">
+          <input type="password" id="in-pass-new" minlength="8" autocomplete="new-password" placeholder="Contraseña nueva (mínimo 8)" required aria-label="Contraseña nueva">
+          <input type="password" id="in-pass-new2" minlength="8" autocomplete="new-password" placeholder="Repite la nueva" required aria-label="Repite la contraseña nueva">
+          <button class="btn" type="submit">Cambiar contraseña</button>
+        </form>
+        <button class="btn ghost" id="btn-lock-now" type="button"><svg class="ic"><use href="#i-lock"/></svg> Bloquear ahora</button>
+      </section>
+      <section>
+        <h3>Copia de seguridad</h3>
+        <p class="muted">Incluye tu clave, tus contactos y tus mensajes (salvo los temporales), cifrados con una contraseña. Sirve para pasar Susurro a otro dispositivo o recuperarlo si se borra el navegador.</p>
+        <form id="form-backup" class="stack">
+          <input type="password" id="in-backup-pass" minlength="10" placeholder="Contraseña o frase (mínimo 10 caracteres)" autocomplete="new-password" required aria-label="Contraseña de la copia">
+          <button class="btn ghost small" id="btn-gen-pass" type="button">Generar una contraseña segura</button>
+          <button class="btn" type="submit"><svg class="ic"><use href="#i-download"/></svg> Guardar copia cifrada</button>
+        </form>
+      </section>
+      <section>
+        <h3>Relays</h3>
+        <p class="muted">Servidores Nostr por los que viajan los mensajes cifrados. Los borran a los 7 días como mucho. Uno por línea.</p>
+        <textarea id="in-relays" rows="5" spellcheck="false"></textarea>
+        <ul id="relay-status" class="relay-status"></ul>
+        <div class="row">
+          <button class="btn small" id="btn-relays-save" type="button">Guardar relays</button>
+          <button class="btn small ghost" id="btn-relays-reset" type="button">Restablecer</button>
+        </div>
+      </section>
+      <section>
+        <h3>Zona peligrosa</h3>
+        <button class="btn danger" id="btn-wipe" type="button">Borrar todo de este dispositivo</button>
+      </section>
+      <p class="fine">Susurro · OpenPGP.js + Nostr</p>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

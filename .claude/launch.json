@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "susurro",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-c", "import os, functools, http.server as h; h.test(HandlerClass=functools.partial(h.SimpleHTTPRequestHandler, directory='public'), port=int(os.environ.get('PORT', '8765')), bind='127.0.0.1')"],
+      "port": 8765,
+      "autoPort": true
+    }
+  ]
+}

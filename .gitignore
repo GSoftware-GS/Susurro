@@ -1,0 +1,15 @@
+# Secretos y configuración local
+.env
+.env.*
+config.php
+.claude/settings.local.json
+
+# Copias de seguridad de Susurro (contienen tu clave, aunque cifrada): nunca al repositorio
+susurro-copia-*
+*.asc
+
+# Dependencias y restos del sistema
+node_modules/
+.DS_Store
+Thumbs.db
+desktop.ini

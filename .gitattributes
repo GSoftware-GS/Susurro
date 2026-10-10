@@ -1,0 +1,5 @@
+# Los archivos se guardan y se descargan tal cual (saltos de línea LF): lo publicado debe ser
+# idéntico byte a byte a lo verificado, y las librerías de vendor/ idénticas a las de npm.
+* text=auto eol=lf
+*.png binary
+public/vendor/** -text
