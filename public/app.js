@@ -21,13 +21,14 @@
   const SINCE_MARGIN = 2 * 86400;       // al reconectar se vuelven a pedir los últimos 2 días
   const RESIGN_AFTER = 3600;            // un pendiente más antiguo se vuelve a firmar al publicarlo
   const RELAY_TTL = 7 * 86400;          // los relays borran los mensajes cifrados a los 7 días (NIP-40)
-  const MAX_TTL = 30 * 86400;
   const TIMERS = [[0, 'Desactivados'], [300, '5 minutos'], [3600, '1 hora'], [86400, '1 día'], [604800, '1 semana']];
+  const TTLS = new Set(TIMERS.map(([s]) => s)); // solo se aceptan estos temporizadores
   const SEEN_MAX = 5000;
   const PAD_BLOCK = 512;                // el contenido se rellena a múltiplos de 512 bytes
-  const MIN_ACCESS_PASS = 8;
+  const MIN_ACCESS_PASS = 10;
   const MIN_BACKUP_PASS = 10;
   const AUTOLOCK_MS = 5 * 60 * 1000;    // se bloquea tras 5 minutos en segundo plano
+  const IDLE_LOCK_MS = 15 * 60 * 1000;  // o tras 15 minutos abierta sin usarla
   const ARGON2_LIMITS = { maxArgon2MemoryExponent: 17 }; // como mucho 128 MiB al abrir datos ajenos
   const VAULT_AAD = new TextEncoder().encode('susurro:vault:v2');
 
@@ -61,6 +62,8 @@
   let waitingWorker = null;
   let previewSeq = 0;
   let hiddenAt = 0;
+  let lockTimer = null;
+  let lastActivity = Date.now();
   let eventQueue = Promise.resolve();
   let saveChain = Promise.resolve();
   let seen = new Set();
@@ -140,7 +143,8 @@
     'і': 'i', 'ї': 'i', 'ј': 'j', 'ѕ': 's', 'ԁ': 'd', 'ӏ': 'l', 'ԛ': 'q', 'ԝ': 'w', 'ɡ': 'g', 'ı': 'i',
     'α': 'a', 'β': 'b', 'ε': 'e', 'η': 'n', 'ι': 'i', 'κ': 'k', 'μ': 'u', 'ν': 'v', 'ο': 'o', 'ρ': 'p', 'τ': 't', 'υ': 'u', 'χ': 'x', 'ω': 'w',
   };
-  const skeleton = (name) => Array.from(name.normalize('NFKD').toLowerCase().replace(/[\p{M}\p{Z}\p{P}\p{Cf}\s]/gu, ''))
+  Object.assign(HOMOGLYPHS, { '1': 'l', 'i': 'l', '|': 'l', '0': 'o' });
+  const skeleton = (name) => Array.from(name.normalize('NFKD').toLowerCase().replace(/[\p{M}\p{Z}\p{P}\p{Cf}\s]/gu, '').replace(/rn/g, 'm'))
     .map((ch) => HOMOGLYPHS[ch] || ch).join('');
 
   const timeFmt = new Intl.DateTimeFormat('es', { hour: '2-digit', minute: '2-digit' });
@@ -294,6 +298,18 @@
     state = normalizeState(JSON.parse(new TextDecoder().decode(plain)));
   }
 
+  // Comprueba la contraseña contra la clave que hay en memoria, sin tocar el estado.
+  async function verifyPass(pass) {
+    try {
+      const res = await openpgp.decrypt({
+        message: await openpgp.readMessage({ armoredMessage: vault.wrap }),
+        passwords: [pass], format: 'binary', config: ARGON2_LIMITS,
+      });
+      res.data.fill(0);
+      return true;
+    } catch { return false; }
+  }
+
   async function persist() {
     if (halted || !state || !vault) return;
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -322,6 +338,9 @@
 
   async function lockNow() {
     if (!unlocked) return;
+    unlocked = false;
+    $('#app').hidden = true; // nada a la vista mientras termina el guardado
+    for (const d of document.querySelectorAll('dialog[open]')) d.close();
     await flushSave();
     halted = true;
     location.reload(); // la recarga borra de la memoria la clave y las conversaciones
@@ -411,7 +430,7 @@
     if (typeof p.key !== 'string' || p.key.length > MAX_KEY_CHARS) return null;
     if (p.t !== undefined && p.t !== 'timer') return null;
     p.ttl = p.ttl ?? 0;
-    if (!Number.isInteger(p.ttl) || p.ttl < 0 || p.ttl > MAX_TTL) return null;
+    if (!TTLS.has(p.ttl)) return null;
     const senderKey = await openpgp.readKey({ binaryKey: b64u.dec(p.key) });
     if (senderKey.isPrivate()) return null;
     // Segunda pasada: exige una firma válida hecha con la clave que viene dentro.
@@ -499,22 +518,27 @@
     subscribe() {
       clearTimeout(this.subTimer);
       this.reqAt = nowSec();
-      this.page = { sub: SUB_ID, got: 0, oldest: Infinity, prev: Infinity, n: 0 };
+      this.page = { sub: SUB_ID, got: 0, oldest: Infinity, n: 0 };
       this.send(['REQ', SUB_ID, this.pool.filter(this.url)]);
     }
-    // Un relay entrega como mucho SUB_LIMIT eventos (los más recientes). Si llega al tope puede haber
-    // más antiguos (por ejemplo, si alguien inunda la etiqueta): se piden antes de dar el histórico por completo.
+    // Un relay entrega como mucho SUB_LIMIT eventos, los más recientes (y algunos relays menos aún).
+    // Mientras una página traiga eventos se pide la anterior, hasta una vacía: solo entonces el histórico
+    // está completo. Así, inundar la etiqueta no oculta los mensajes legítimos más antiguos.
     onEose() {
       const pg = this.page;
-      if (pg.got >= SUB_LIMIT && pg.n < MAX_PAGES && Number.isFinite(pg.oldest)) {
-        const until = pg.oldest < pg.prev ? pg.oldest : pg.oldest - 1;
-        Object.assign(pg, { sub: BACKFILL_ID, got: 0, prev: pg.oldest, oldest: Infinity, n: pg.n + 1 });
+      if (pg.got > 0 && Number.isFinite(pg.oldest)) {
+        if (pg.n >= MAX_PAGES) { this.endPaging(); return; } // demasiadas páginas: se reintentará al reconectar
+        const until = pg.oldest - 1; // siempre baja, así que acaba en una página vacía
+        Object.assign(pg, { sub: BACKFILL_ID, got: 0, oldest: Infinity, n: pg.n + 1 });
         this.send(['REQ', BACKFILL_ID, { ...this.pool.filter(this.url), until }]);
         return;
       }
-      if (pg.sub === BACKFILL_ID) this.send(['CLOSE', BACKFILL_ID]);
+      this.endPaging();
+      this.pool.onEose(this.url, this.reqAt);
+    }
+    endPaging() {
+      if (this.page?.sub === BACKFILL_ID) this.send(['CLOSE', BACKFILL_ID]);
       this.page = null;
-      if (pg.got < SUB_LIMIT) this.pool.onEose(this.url, this.reqAt);
     }
     publish(ev) {
       if (this.waiting.has(ev.id)) return this.waiting.get(ev.id).promise;
@@ -545,6 +569,8 @@
       } else if (m[0] === 'CLOSED' && m[1] === SUB_ID) {
         clearTimeout(this.subTimer);
         this.subTimer = setTimeout(() => this.subscribe(), 60000);
+      } else if (m[0] === 'CLOSED' && m[1] === BACKFILL_ID && this.page?.sub === BACKFILL_ID) {
+        this.page = null; // histórico incompleto: no se avanza relaySince y se reintentará al reconectar
       }
     }
   }
@@ -657,8 +683,10 @@
     }
     markSeen(key, ts);
     // El temporizador lo fija quien escribe: cada mensaje lleva el suyo y el chat se sincroniza.
-    if ((c.ttl || 0) !== p.ttl) {
+    // Solo cuenta si el mensaje es posterior al último cambio (los relays pueden entregarlos desordenados).
+    if (ts >= (c.ttlAt || 0) && (c.ttl || 0) !== p.ttl) {
       c.ttl = p.ttl;
+      c.ttlAt = ts;
       addMessage(fpr, sysMsg(timerText(c.name, p.ttl), ts));
       if (current === fpr) renderChatHeader();
     }
@@ -692,7 +720,7 @@
     const { payload, ttl, ev } = await buildEvent(fpr, { text });
     const m = { id: payload.id, dir: 'out', text, ts: payload.ts, st: 'sending', ev, exp: ttl ? payload.ts + ttl * 1000 : 0 };
     addMessage(fpr, m);
-    save();
+    save(true);
     renderList();
     renderMessages(true, true);
     publishMsg(fpr, m);
@@ -704,9 +732,10 @@
     c.ttl = ttl;
     // Aviso de control cifrado para que el otro lado use el mismo temporizador.
     const { payload, ev } = await buildEvent(fpr, { t: 'timer' });
+    c.ttlAt = payload.ts;
     const m = sysMsg(timerText('Has', ttl), payload.ts, { id: payload.id, st: 'sending', ev });
     addMessage(fpr, m);
-    save();
+    save(true);
     renderChatHeader();
     renderList();
     renderMessages(true, true);
@@ -716,7 +745,11 @@
   function publishMsg(fpr, m) {
     if (!pool || !m.ev || inflight.has(m.id)) return;
     // Un pendiente antiguo se firma de nuevo con fecha actual para que entre en el filtro del destinatario.
-    if (!Number.isFinite(m.ev.created_at) || nowSec() - m.ev.created_at > RESIGN_AFTER) m.ev = signEvent(m.ev.tags, m.ev.content);
+    // Si no es temporal, también se renueva su caducidad (los temporales conservan la suya).
+    if (!Number.isFinite(m.ev.created_at) || nowSec() - m.ev.created_at > RESIGN_AFTER) {
+      const tags = m.exp ? m.ev.tags : m.ev.tags.map((t) => (t[0] === 'expiration' ? ['expiration', String(nowSec() + RELAY_TTL)] : t));
+      m.ev = signEvent(tags, m.ev.content);
+    }
     inflight.add(m.id);
     pool.publish(m.ev).then((ok) => {
       inflight.delete(m.id);
@@ -750,7 +783,12 @@
     let changed = false;
     for (const [fpr, list] of Object.entries(state.msgs)) {
       const keep = list.filter((m) => !m.exp || m.exp > now);
-      if (keep.length !== list.length) { state.msgs[fpr] = keep; changed = true; }
+      if (keep.length === list.length) continue;
+      const c = state.contacts[fpr];
+      // Los no leídos que caducan tampoco deben seguir contando.
+      if (c?.unread) c.unread = Math.max(0, c.unread - list.filter((m) => m.dir === 'in' && m.exp && m.exp <= now).length);
+      state.msgs[fpr] = keep;
+      changed = true;
     }
     if (!changed) return;
     save();
@@ -884,7 +922,15 @@
   }
 
   function msgEl(m, allowLinks) {
-    if (m.dir === 'sys') return h('div', { class: 'sys', 'data-id': m.id }, h('span', {}, icon('timer'), m.text));
+    if (m.dir === 'sys') {
+      const el = h('div', { class: 'sys', 'data-id': m.id }, h('span', {}, icon('timer'), m.text));
+      if (m.st === 'failed') {
+        el.append(h('span', { class: 'fail-note' }, 'No se pudo avisar. Toca para reintentar.'));
+        const fpr = current;
+        el.addEventListener('click', () => retry(fpr, m));
+      }
+      return el;
+    }
     const meta = h('span', { class: 'meta' }, m.exp ? icon('timer') : null, timeFmt.format(m.ts), m.dir === 'out' ? statusIcon(m.st) : null);
     const el = h('div', { class: `msg ${m.dir}${m.st === 'failed' ? ' failed' : ''}`, 'data-id': m.id },
       h('div', { class: 'bubble' }, linkify(m.text, allowLinks), meta));
@@ -1171,11 +1217,12 @@
   }
 
   async function makeBackup(pass) {
-    const { me, contacts, relays, since, relaySince, seen: seenList, seenFloor } = state;
-    // Los mensajes temporales no se copian: deben desaparecer.
+    const { me, contacts, relays, since, relaySince, seenFloor } = state;
+    // Los mensajes temporales no se copian (deben desaparecer), ni la lista de vistos, que delataría
+    // cuándo los hubo: al restaurar se reconstruye a partir de los mensajes copiados.
     const msgs = {};
     for (const [fpr, list] of Object.entries(state.msgs)) msgs[fpr] = list.filter((m) => !m.exp);
-    const data = { app: 'susurro', v: 1, me, contacts, msgs, relays, since, relaySince, seen: seenList, seenFloor };
+    const data = { app: 'susurro', v: 1, me, contacts, msgs, relays, since, relaySince, seenFloor };
     const armored = await openpgp.encrypt({
       message: await openpgp.createMessage({ text: JSON.stringify(data) }),
       passwords: [pass],
@@ -1198,7 +1245,7 @@
       contacts[c.fpr] = {
         fpr: c.fpr, name: cleanName(c.name), status: blocked ? 'blocked' : c.status === 'ok' ? 'ok' : 'pending',
         added: okTs(c.added) ? c.added : Date.now(), lastTs: okTs(c.lastTs) ? c.lastTs : 0, unread: 0,
-        verified: c.verified === true, ttl: Number.isInteger(c.ttl) && c.ttl >= 0 && c.ttl <= MAX_TTL ? c.ttl : 0,
+        verified: c.verified === true, ttl: TTLS.has(c.ttl) ? c.ttl : 0, ttlAt: okTs(c.ttlAt) ? c.ttlAt : 0,
         ...(blocked ? {} : { pub: c.pub }),
       };
     }
@@ -1228,7 +1275,8 @@
       contacts, msgs, relaySince, seenFloor,
       relays: relays.length ? relays : DEFAULT_RELAYS.slice(),
       since: Number(data.since) || nowSec() - 7 * 86400,
-      seen: (Array.isArray(data.seen) ? data.seen : []).filter((s) => Array.isArray(s) && str(s[0]) && s[0].length <= 160 && okTs(s[1])),
+      // Los recibidos restaurados cuentan como vistos: los relays no los volverán a mostrar duplicados.
+      seen: Object.entries(msgs).flatMap(([fpr, list]) => list.filter((m) => m.dir === 'in').map((m) => [fpr + ':' + m.id, m.ts])).slice(-SEEN_MAX),
     };
   }
 
@@ -1360,7 +1408,7 @@
 
   function showSetPass(reason) {
     $('#setpass-lead').textContent = reason === 'migrate'
-      ? 'Ahora Susurro protege tus datos con una contraseña. Créala para seguir.'
+      ? 'Ahora Susurro protege tus datos con una contraseña. Créala para seguir. (Si ya tenías contraseña y no acabas de actualizar la app, alguien ha podido manipular tus datos: no sigas y borra los datos del sitio.)'
       : 'Elige la contraseña con la que abrirás Susurro en este dispositivo.';
     showScreen('#setpass');
   }
@@ -1411,6 +1459,7 @@
           state = freshState();
           await setIdentity(privateKey);
           await createVault(pass);
+          $('#in-create-pass').value = $('#in-create-pass2').value = '';
           await enter();
         } catch (ex) {
           console.error(ex);
@@ -1597,17 +1646,13 @@
       e.preventDefault();
       const next = $('#in-pass-new').value;
       try { checkNewPass(next, $('#in-pass-new2').value); } catch (ex) { return toast(ex.message); }
+      const clear = () => { for (const id of ['#in-pass-old', '#in-pass-new', '#in-pass-new2']) $(id).value = ''; };
       await withBusy(e.submitter || $('#form-pass button'), 'Cambiando…', async () => {
-        // Se comprueba la actual descifrando lo guardado; después todo se vuelve a cifrar con una clave nueva.
-        const live = state;
-        try {
-          stored = JSON.parse(localStorage.getItem(STORE_KEY));
-          await openVault($('#in-pass-old').value);
-        } catch { stored = null; return toast('La contraseña actual no es correcta'); }
-        finally { state = live; } // lo que está en memoria es lo más reciente
+        // Se comprueba la actual contra la clave en memoria; después todo se vuelve a cifrar con una clave nueva.
+        if (!(await verifyPass($('#in-pass-old').value))) { clear(); return toast('La contraseña actual no es correcta'); }
         await createVault(next);
         await flushSave();
-        for (const id of ['#in-pass-old', '#in-pass-new', '#in-pass-new2']) $(id).value = '';
+        clear();
         toast('Contraseña cambiada');
       });
     });
@@ -1625,12 +1670,25 @@
     window.addEventListener('online', () => { pool?.wake(true); renderNet(); });
     window.addEventListener('offline', renderNet);
     window.addEventListener('pagehide', () => { flushSave(); });
+    // Autobloqueo: a los 5 minutos en segundo plano (el temporizador o, si el sistema lo congeló,
+    // la comprobación al volver) y a los 15 minutos abierta sin usarla.
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) { hiddenAt = Date.now(); flushSave(); return; }
-      if (unlocked && Date.now() - hiddenAt > AUTOLOCK_MS && hiddenAt) return void lockNow();
+      if (document.hidden) {
+        hiddenAt = Date.now();
+        flushSave();
+        if (unlocked) { clearTimeout(lockTimer); lockTimer = setTimeout(lockNow, AUTOLOCK_MS); }
+        return;
+      }
+      clearTimeout(lockTimer);
+      lastActivity = Date.now();
+      if (unlocked && hiddenAt && Date.now() - hiddenAt > AUTOLOCK_MS) return void lockNow();
       pool?.wake(Date.now() - hiddenAt > 30000);
       if (current && state.contacts[current]?.unread) { state.contacts[current].unread = 0; save(); renderList(); }
     });
+    for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+      window.addEventListener(ev, () => { lastActivity = Date.now(); }, { passive: true, capture: true });
+    }
+    setInterval(() => { if (unlocked && !document.hidden && Date.now() - lastActivity > IDLE_LOCK_MS) lockNow(); }, 30000);
     window.addEventListener('storage', (e) => {
       if ((e.key !== STORE_KEY && e.key !== null) || halted) return;
       halt(e.newValue === null ? 'Se han borrado los datos de Susurro en otra ventana.' : 'Susurro está abierto en otra ventana.');

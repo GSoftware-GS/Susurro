@@ -75,8 +75,8 @@
         <label for="in-name">¿Cómo quieres que te vean?</label>
         <input id="in-name" maxlength="40" autocomplete="nickname" placeholder="Tu nombre o apodo" required>
         <label for="in-create-pass">Contraseña para abrir Susurro</label>
-        <input id="in-create-pass" type="password" minlength="8" autocomplete="new-password" placeholder="Mínimo 8 caracteres" required>
-        <input id="in-create-pass2" type="password" minlength="8" autocomplete="new-password" placeholder="Repite la contraseña" required aria-label="Repite la contraseña">
+        <input id="in-create-pass" type="password" minlength="10" autocomplete="new-password" placeholder="Mínimo 10 caracteres; mejor una frase" required>
+        <input id="in-create-pass2" type="password" minlength="10" autocomplete="new-password" placeholder="Repite la contraseña" required aria-label="Repite la contraseña">
         <p class="fine left">Cifra todo lo que Susurro guarda en este dispositivo. Si la olvidas, solo podrás recuperar tu cuenta con una copia de seguridad.</p>
         <p id="create-error" class="error" hidden></p>
         <button class="btn primary" type="submit">Crear mi identidad</button>
@@ -121,8 +121,8 @@
       <p class="lead" id="setpass-lead"></p>
       <form id="form-setpass" class="stack">
         <label for="in-setpass">Contraseña para abrir Susurro</label>
-        <input id="in-setpass" type="password" minlength="8" autocomplete="new-password" placeholder="Mínimo 8 caracteres" required>
-        <input id="in-setpass2" type="password" minlength="8" autocomplete="new-password" placeholder="Repite la contraseña" required aria-label="Repite la contraseña">
+        <input id="in-setpass" type="password" minlength="10" autocomplete="new-password" placeholder="Mínimo 10 caracteres; mejor una frase" required>
+        <input id="in-setpass2" type="password" minlength="10" autocomplete="new-password" placeholder="Repite la contraseña" required aria-label="Repite la contraseña">
         <p class="fine left">Si la olvidas, solo podrás recuperar tu cuenta con una copia de seguridad.</p>
         <p id="setpass-error" class="error" hidden></p>
         <button class="btn primary" type="submit">Guardar contraseña</button>
@@ -255,11 +255,11 @@
       </section>
       <section>
         <h3>Contraseña de acceso</h3>
-        <p class="muted">Cifra todo lo guardado en este dispositivo. Susurro se bloquea solo tras 5 minutos en segundo plano.</p>
+        <p class="muted">Cifra todo lo guardado en este dispositivo. Susurro se bloquea solo tras 5 minutos en segundo plano o 15 sin usarlo.</p>
         <form id="form-pass" class="stack">
           <input type="password" id="in-pass-old" autocomplete="current-password" placeholder="Contraseña actual" required aria-label="Contraseña actual">
-          <input type="password" id="in-pass-new" minlength="8" autocomplete="new-password" placeholder="Contraseña nueva (mínimo 8)" required aria-label="Contraseña nueva">
-          <input type="password" id="in-pass-new2" minlength="8" autocomplete="new-password" placeholder="Repite la nueva" required aria-label="Repite la contraseña nueva">
+          <input type="password" id="in-pass-new" minlength="10" autocomplete="new-password" placeholder="Contraseña nueva (mínimo 10)" required aria-label="Contraseña nueva">
+          <input type="password" id="in-pass-new2" minlength="10" autocomplete="new-password" placeholder="Repite la nueva" required aria-label="Repite la contraseña nueva">
           <button class="btn" type="submit">Cambiar contraseña</button>
         </form>
         <button class="btn ghost" id="btn-lock-now" type="button"><svg class="ic"><use href="#i-lock"/></svg> Bloquear ahora</button>
