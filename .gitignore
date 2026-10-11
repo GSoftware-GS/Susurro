@@ -13,3 +13,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Vídeo tutorial: se regenera con `npm run render` en tutorial/
+tutorial/stills/
+tutorial/*.mp4

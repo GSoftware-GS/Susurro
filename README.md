@@ -116,6 +116,16 @@ El service worker sirve la app desde su caché, así que tras editar un archivo 
   En los dos casos solo se envía a relays que estén en tu lista: un contacto no puede llevarte a un relay suyo para ver tu IP.
 - **Borrar todo:** Ajustes → Zona peligrosa. Elimina identidad, contactos y mensajes de ese dispositivo. Si olvidas la contraseña, la pantalla de bloqueo ofrece lo mismo para empezar de nuevo o restaurar una copia.
 
+## Vídeo tutorial
+
+`tutorial/` genera un vídeo vertical (1080×1920, 80 s) que explica cómo usar Susurro, con gráficos animados y música lo-fi original sintetizada por código (sin derechos de terceros). Necesita Node y ffmpeg:
+
+```bash
+cd tutorial && npm install && npm run render
+```
+
+El resultado es `tutorial/susurro-tutorial.mp4` (no se guarda en git). `node render.mjs --stills 3,20,45` saca fotogramas sueltos en `tutorial/stills/` para revisar el diseño sin generar el vídeo entero. Los textos de cada escena están en la lista `SCENES` de `render.mjs` y la música en `music.mjs`.
+
 ## Estructura
 
 | Archivo | Contenido |
@@ -131,6 +141,7 @@ El service worker sirve la app desde su caché, así que tras editar un archivo 
 | `public/.htaccess` | HTTPS obligatorio y cabeceras de seguridad en Apache/LiteSpeed (Hostinger) |
 | `public/icons/` | Iconos de la app |
 | `public/vendor/` | Librerías de terceros sin modificar y sus licencias (`vendor/licenses/`) |
+| `tutorial/` | Generador del vídeo tutorial (no se publica) |
 | `.claude/launch.json` | Servidor local para la vista previa de Claude Code (no se publica) |
 
 ## Librerías de terceros

@@ -1,0 +1,12 @@
+{
+  "name": "susurro-tutorial",
+  "private": true,
+  "type": "module",
+  "description": "Genera el vídeo tutorial de Susurro (motion graphics + música lo-fi sintetizada)",
+  "scripts": {
+    "render": "node render.mjs"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "1.0.11"
+  }
+}
