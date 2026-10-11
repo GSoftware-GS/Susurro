@@ -17,3 +17,6 @@ desktop.ini
 # Vídeo tutorial: se regenera con `npm run render` en tutorial/
 tutorial/stills/
 tutorial/*.mp4
+
+# Archivos locales del programa de Netlify (netlify deploy)
+.netlify/
