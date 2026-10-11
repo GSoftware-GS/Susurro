@@ -5,7 +5,7 @@
 // cuando el usuario pulsa «Actualizar» o en el siguiente arranque. Así nunca se mezclan versiones.
 const CACHE = 'susurro-v5';
 const ASSETS = [
-  './', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest',
+  './', 'index.html', 'legal.html', 'app.js', 'styles.css', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',
   'vendor/openpgp.min.js', 'vendor/nostr.bundle.js', 'vendor/qrcode.js', 'vendor/jsQR.js',
 ];

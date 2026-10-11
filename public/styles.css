@@ -338,3 +338,13 @@ dialog[open] { animation: sheet-in .2s ease-out; }
 textarea[readonly] { opacity: .7; }
 .relay-status .ok i { background: var(--ok); }
 .relay-status .bad i { background: var(--danger); }
+
+/* ---------- Aceptación y página legal ---------- */
+.check { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; font-size: 14px; }
+.check input { margin-top: 3px; accent-color: var(--accent); flex: none; }
+.legal-page { min-height: 100dvh; }
+.legal { max-width: 720px; margin: 0 auto; padding: calc(24px + env(safe-area-inset-top)) 16px calc(40px + env(safe-area-inset-bottom)); line-height: 1.6; }
+.legal h1 { font-size: 28px; margin: 12px 0 4px; }
+.legal h2 { font-size: 18px; margin: 28px 0 8px; }
+.legal p, .legal ul { margin: 0 0 12px; }
+.legal li { margin-bottom: 8px; }

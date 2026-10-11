@@ -78,6 +78,7 @@
         <input id="in-create-pass" type="password" minlength="10" autocomplete="new-password" placeholder="Mínimo 10 caracteres; mejor una frase" required>
         <input id="in-create-pass2" type="password" minlength="10" autocomplete="new-password" placeholder="Repite la contraseña" required aria-label="Repite la contraseña">
         <p class="fine left">Cifra todo lo que Susurro guarda en este dispositivo. Si la olvidas, solo podrás recuperar tu cuenta con una copia de seguridad.</p>
+        <label class="check"><input type="checkbox" id="in-terms-create" required> <span>He leído y acepto los <a href="legal.html" target="_blank" rel="noopener">términos de uso y la política de privacidad</a></span></label>
         <p id="create-error" class="error" hidden></p>
         <button class="btn primary" type="submit">Crear mi identidad</button>
       </form>
@@ -94,7 +95,7 @@
           <button class="btn" type="submit">Restaurar</button>
         </form>
       </details>
-      <p class="fine">Las claves se generan en tu dispositivo. Nadie más puede leer tus mensajes.</p>
+      <p class="fine">Las claves se generan en tu dispositivo. Nadie más puede leer tus mensajes. · <a href="legal.html" target="_blank" rel="noopener">Términos y privacidad</a></p>
     </div>
   </main>
 
@@ -124,6 +125,7 @@
         <input id="in-setpass" type="password" minlength="10" autocomplete="new-password" placeholder="Mínimo 10 caracteres; mejor una frase" required>
         <input id="in-setpass2" type="password" minlength="10" autocomplete="new-password" placeholder="Repite la contraseña" required aria-label="Repite la contraseña">
         <p class="fine left">Si la olvidas, solo podrás recuperar tu cuenta con una copia de seguridad.</p>
+        <label class="check"><input type="checkbox" id="in-terms-setpass" required> <span>He leído y acepto los <a href="legal.html" target="_blank" rel="noopener">términos de uso y la política de privacidad</a></span></label>
         <p id="setpass-error" class="error" hidden></p>
         <button class="btn primary" type="submit">Guardar contraseña</button>
       </form>
@@ -292,7 +294,7 @@
         <h3>Zona peligrosa</h3>
         <button class="btn danger" id="btn-wipe" type="button">Borrar todo de este dispositivo</button>
       </section>
-      <p class="fine">Susurro · OpenPGP.js + Nostr</p>
+      <p class="fine">Susurro · OpenPGP.js + Nostr · <a href="legal.html" target="_blank" rel="noopener">Términos y privacidad</a></p>
     </div>
   </dialog>
 

@@ -127,7 +127,8 @@
 
   // Etiquetas secretas por conversación: cada uno da al otro (dentro del mensaje cifrado) un secreto
   // de 32 bytes, y quien escribe calcula con él una etiqueta distinta cada día (HMAC del número de día).
-  // Los relays solo ven valores aleatorios que cambian a diario y no se pueden asociar a tu clave pública.
+  // Quien solo conoce tu clave pública no puede calcularlas ni contar tus mensajes. Los relays a los que
+  // te conectas sí pueden relacionarlas contigo (las escuchas todas a la vez): eso solo lo evita Tor o una VPN.
   const dayOf = (sec) => Math.floor(sec / 86400);
   const newSecret = () => b64u.enc(crypto.getRandomValues(new Uint8Array(32)));
   const isSecret = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{43}$/.test(s);
@@ -668,8 +669,8 @@
   // Cada mensaje sale por SEND_RELAYS relays elegidos al azar entre los que escucha el destinatario,
   // tras una espera aleatoria. true: aceptado por al menos dos (o por todos si son menos) ·
   // false: todos lo rechazaron · null: sin respuesta suficiente (se reintentará con otros al azar).
-  async function publishRandom(ev, targets) {
-    const pick = shuffle(targets).slice(0, SEND_RELAYS);
+  async function publishRandom(ev, { urls, all }) {
+    const pick = all ? urls.slice() : shuffle(urls).slice(0, SEND_RELAYS);
     if (!pick.length || !navigator.onLine) return null;
     await sleep(SEND_DELAY_MS[0] + randInt(SEND_DELAY_MS[1] - SEND_DELAY_MS[0]));
     const results = await Promise.all(pick.map((u) => publishOnce(u, ev)));
@@ -680,23 +681,38 @@
 
   // Relays a los que enviar a un contacto: los que él escucha Y están en mi lista (así un contacto no
   // puede llevarme a un relay suyo para ver mi IP). Si no coinciden en ninguno, los míos.
+  // Mientras no sé dónde escucha (primer mensaje, o contacto con una versión antigua) se envía a todos
+  // mis relays para no perder el mensaje; después, a 3 al azar de los comunes.
   function targetsFor(c) {
     const common = (c.relays || []).filter((u) => state.relays.includes(u));
-    return common.length ? common : state.relays;
+    return common.length ? { urls: common, all: false } : { urls: state.relays, all: true };
   }
 
   // Recalcula las etiquetas que escucho: la pública (para solicitudes nuevas) y, por cada chat,
   // la secreta de los últimos días (los mensajes caducan a los 7 días) y la de mañana (relojes adelantados).
+  let tagGen = 0, tagCapWarned = false;
   async function refreshTags() {
     if (!state?.me?.tag) return;
-    const today = dayOf(nowSec());
-    const since = Math.min(state.since, ...Object.values(state.relaySince)) - SINCE_MARGIN;
-    const first = Math.max(dayOf(since), today - TAG_DAYS);
-    const tags = [state.me.tag];
+    const gen = ++tagGen;
+    // Las lápidas de contactos borrados se olvidan del todo pasados TAG_DAYS días.
     for (const c of Object.values(state.contacts)) {
-      if (c.status === 'blocked' || !isSecret(c.inSecret)) continue;
+      if (c.status === 'deleted' && !(nowSec() - c.deletedAt < TAG_DAYS * 86400)) delete state.contacts[c.fpr];
+    }
+    const today = dayOf(nowSec());
+    // Desde el histórico más antiguo pendiente de algún relay (con margen), y como mucho TAG_DAYS días.
+    const known = state.relays.map((u) => state.relaySince[u]).filter(Number.isFinite);
+    const base = known.length === state.relays.length ? Math.min(...known) : Math.max(state.since, nowSec() - TAG_DAYS * 86400);
+    const first = Math.max(dayOf(base - SINCE_MARGIN), today - TAG_DAYS);
+    const tags = [state.me.tag];
+    // Los chats más recientes primero: si se llega al tope, quedan fuera los más antiguos.
+    const chats = Object.values(state.contacts)
+      .filter((c) => c.status !== 'blocked' && isSecret(c.inSecret) && (c.status !== 'deleted' || nowSec() - c.deletedAt < TAG_DAYS * 86400))
+      .sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+    for (const c of chats) {
       for (let d = today + 1; d >= first && tags.length < MAX_SUB_TAGS; d--) tags.push(await pairTag(c.inSecret, d));
     }
+    if (gen !== tagGen) return; // otra llamada más reciente ya se encarga
+    if (tags.length >= MAX_SUB_TAGS && !tagCapWarned) { tagCapWarned = true; toast('Tienes muchos chats: los más antiguos podrían no recibir mensajes'); }
     tagDay = today;
     const changed = tags.join() !== subTags.join();
     subTags = tags;
@@ -754,11 +770,13 @@
     if (fpr === state.me.fpr || seen.has(key) || seen.has(p.id) || ts <= (state.seenFloor[fpr] || 0)) return;
     let c = own(state.contacts, fpr) ? state.contacts[fpr] : null;
     if (c?.status === 'blocked') return;
-    if (!c) {
+    if (!c || c.status === 'deleted') {
       // Límite de solicitudes: crear claves no cuesta nada y llenarían el almacenamiento.
       if (Object.values(state.contacts).filter((x) => x.status === 'pending').length >= MAX_PENDING) return;
       try { await senderKey.getEncryptionKey(); } catch { return; }
-      c = state.contacts[fpr] = { fpr, name: await keyName(senderKey), pub: p.key, status: 'pending', added: Date.now(), unread: 0, verified: false, ttl: 0 };
+      // Un contacto borrado que vuelve a escribir reaparece como solicitud (con el mismo secreto de antes).
+      const inSecret = c?.inSecret;
+      c = state.contacts[fpr] = { fpr, name: await keyName(senderKey), pub: p.key, status: 'pending', added: Date.now(), unread: 0, verified: false, ttl: 0, inSecret };
       keyCache.set(fpr, senderKey);
     } else if (c.status === 'pending' && (state.msgs[fpr]?.length || 0) >= MAX_PENDING_MSGS) {
       return;
@@ -845,12 +863,20 @@
     if (!pool || !m.ev || !c || inflight.has(m.id)) return;
     // Un pendiente antiguo se firma de nuevo con fecha actual para que entre en el filtro del destinatario.
     // Si no es temporal, también se renueva su caducidad (los temporales conservan la suya).
-    if (!Number.isFinite(m.ev.created_at) || nowSec() - m.ev.created_at > RESIGN_AFTER) {
-      const tags = m.exp ? m.ev.tags : m.ev.tags.map((t) => (t[0] === 'expiration' ? ['expiration', String(nowSec() + RELAY_TTL)] : t));
-      m.ev = signEvent(tags, m.ev.content);
-    }
+    // La etiqueta secreta también se recalcula para hoy (la de un día antiguo puede quedar fuera de lo que escucha).
     inflight.add(m.id);
-    publishRandom(m.ev, targetsFor(c)).then((ok) => {
+    (async () => {
+      if (!Number.isFinite(m.ev.created_at) || nowSec() - m.ev.created_at > RESIGN_AFTER) {
+        const pTag = isSecret(c.outSecret) ? await pairTag(c.outSecret, dayOf(nowSec())) : null;
+        const tags = m.ev.tags.map((t) => {
+          if (t[0] === 'expiration' && !m.exp) return ['expiration', String(nowSec() + RELAY_TTL)];
+          if (t[0] === 'p' && pTag) return ['p', pTag];
+          return t;
+        });
+        m.ev = signEvent(tags, m.ev.content);
+      }
+      return publishRandom(m.ev, targetsFor(c));
+    })().catch(() => null).then((ok) => {
       inflight.delete(m.id);
       if (m.st === 'sent') return;
       if (ok === true) { m.st = 'sent'; delete m.ev; }
@@ -905,13 +931,13 @@
   // Otro contacto con un nombre que se ve igual y distinta huella: posible suplantación.
   function nameClash(name, fpr) {
     const k = skeleton(name);
-    return !!k && Object.values(state.contacts).some((c) => c.fpr !== fpr && c.status !== 'blocked' && skeleton(c.name) === k);
+    return !!k && Object.values(state.contacts).some((c) => c.fpr !== fpr && c.status !== 'blocked' && c.status !== 'deleted' && skeleton(c.name) === k);
   }
 
   function renderList() {
     const ul = $('#chat-list');
     const cs = Object.values(state.contacts)
-      .filter((c) => c.status !== 'blocked')
+      .filter((c) => c.status !== 'blocked' && c.status !== 'deleted')
       .sort((a, b) => (b.lastTs || b.added) - (a.lastTs || a.added));
     $('#list-empty').hidden = cs.length > 0;
     ul.hidden = cs.length === 0;
@@ -936,7 +962,7 @@
 
   function updateBadge() {
     let n = 0;
-    for (const c of Object.values(state.contacts)) if (c.status !== 'blocked') n += c.unread || 0;
+    for (const c of Object.values(state.contacts)) if (c.status === 'ok' || c.status === 'pending') n += c.unread || 0;
     document.title = n ? `(${n}) Susurro` : 'Susurro';
     if ('setAppBadge' in navigator) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
   }
@@ -1176,7 +1202,8 @@
     const { key, name, fpr } = pendingContact;
     const existing = own(state.contacts, fpr) ? state.contacts[fpr] : null;
     const pub = b64u.enc(key.write());
-    if (existing) Object.assign(existing, { status: 'ok', name, pub: existing.pub || pub });
+    if (existing?.status === 'deleted') state.contacts[fpr] = { fpr, name, pub, status: 'ok', added: Date.now(), unread: 0, verified: false, ttl: 0, inSecret: existing.inSecret };
+    else if (existing) Object.assign(existing, { status: 'ok', name, pub: existing.pub || pub });
     else state.contacts[fpr] = { fpr, name, pub, status: 'ok', added: Date.now(), unread: 0, verified: false, ttl: 0 };
     keyCache.set(fpr, key);
     save();
@@ -1310,7 +1337,7 @@
   // y lo devuelve al pedirlo. Si no, ese relay no sirve para Susurro (o rechaza este tipo de eventos).
   function testRelay(url) {
     const randomTag = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
-    const ev = signEvent([['p', randomTag], ['expiration', String(nowSec() + 60)]], 'prueba de Susurro');
+    const ev = signEvent([['p', randomTag], ['expiration', String(nowSec() + 60)]], b64u.enc(crypto.getRandomValues(new Uint8Array(24))));
     return new Promise((res) => {
       let ws = null, done = false;
       const finish = (ok, why) => {
@@ -1324,6 +1351,7 @@
       try { ws = new WebSocket(url); } catch { return finish(false, 'dirección no válida'); }
       ws.onopen = () => ws.send(JSON.stringify(['EVENT', ev]));
       ws.onmessage = (e) => {
+        if (typeof e.data !== 'string' || e.data.length > 10000) return;
         let m;
         try { m = JSON.parse(e.data); } catch { return; }
         if (!Array.isArray(m)) return;
@@ -1334,6 +1362,7 @@
         else if (m[0] === 'EOSE') finish(false, 'acepta pero no devuelve los mensajes');
       };
       ws.onerror = () => finish(false, 'no se puede conectar');
+      ws.onclose = () => finish(false, 'cierra la conexión');
     });
   }
 
@@ -1407,7 +1436,7 @@
     const okTs = (t) => Number.isFinite(t) && t >= 0 && t <= Date.now() + MAX_FUTURE_MS;
     const contacts = {};
     for (const c of Object.values(obj(data.contacts))) {
-      if (!c || !str(c.fpr) || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(c.fpr) || !str(c.name)) continue;
+      if (!c || c.status === 'deleted' || !str(c.fpr) || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(c.fpr) || !str(c.name)) continue;
       const blocked = c.status === 'blocked';
       if (!blocked && (!str(c.pub) || c.pub.length > MAX_KEY_CHARS)) continue;
       contacts[c.fpr] = {
@@ -1800,7 +1829,10 @@
     $('#btn-ct-delete').addEventListener('click', () => {
       const c = state.contacts[current];
       if (!confirm(`¿Eliminar el chat con ${c.name}? Se borrarán sus mensajes de este dispositivo.`)) return;
-      delete state.contacts[c.fpr];
+      // Queda solo una «lápida» (huella y mi secreto, sin nombre ni mensajes) durante unos días: si vuelve
+      // a escribir por la etiqueta secreta que ya tenía, reaparece como solicitud en vez de perderse.
+      if (isSecret(c.inSecret)) state.contacts[c.fpr] = { fpr: c.fpr, name: '', status: 'deleted', inSecret: c.inSecret, deletedAt: nowSec(), unread: 0 };
+      else delete state.contacts[c.fpr];
       delete state.msgs[c.fpr];
       keyCache.delete(c.fpr);
       refreshTags();
