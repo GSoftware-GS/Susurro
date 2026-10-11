@@ -276,7 +276,7 @@
   // una clave aleatoria (DEK) que a su vez está cifrada con la contraseña de acceso (Argon2 + AEAD).
   const freshState = () => ({
     me: null, contacts: {}, msgs: {}, seen: [], seenFloor: {},
-    relays: DEFAULT_RELAYS.slice(), since: 0, relaySince: {}, ui: {},
+    relays: DEFAULT_RELAYS.slice(), relayMode: 'default', since: 0, relaySince: {}, ui: {},
   });
 
   function normalizeState(s) {
@@ -284,8 +284,13 @@
     if (!s.seenFloor || typeof s.seenFloor !== 'object' || Array.isArray(s.seenFloor)) s.seenFloor = {};
     if (!Array.isArray(s.seen)) s.seen = [];
     if (!s.relaySince || typeof s.relaySince !== 'object') s.relaySince = {};
-    // Quien tenía la lista antigua de 5 relays pasa a la nueva (más relays entre los que repartir).
-    if (Array.isArray(s.relays) && s.relays.join(' ') === OLD_DEFAULT_RELAYS) s.relays = DEFAULT_RELAYS.slice();
+    // Modo de relays: los recomendados siguen siempre la lista de la versión actual de la app; una lista
+    // propia se respeta tal cual. Quien venía de una versión sin modo y no la había tocado, recomendados.
+    if (s.relayMode !== 'custom' && s.relayMode !== 'default') {
+      const list = Array.isArray(s.relays) ? s.relays.join(' ') : '';
+      s.relayMode = !list || list === OLD_DEFAULT_RELAYS || list === DEFAULT_RELAYS.join(' ') ? 'default' : 'custom';
+    }
+    if (s.relayMode === 'default' || !Array.isArray(s.relays) || !s.relays.length) s.relays = DEFAULT_RELAYS.slice();
     return s;
   }
 
@@ -1268,7 +1273,7 @@
   function openSettings() {
     $('#set-name').textContent = state.me.name;
     $('#set-fpr').textContent = fmtFpr(state.me.fpr);
-    $('#in-relays').value = state.relays.join('\n');
+    showRelayMode(state.relayMode);
     for (const id of ['#in-backup-pass', '#in-pass-old', '#in-pass-new', '#in-pass-new2']) $(id).value = '';
     $('#in-backup-pass').type = 'password';
     renderRelayStatus();
@@ -1283,17 +1288,85 @@
 
   const isWss = (u) => { try { return new URL(u).protocol === 'wss:'; } catch { return false; } };
 
-  function saveRelays() {
+  // ---------- Relays: recomendados o lista propia ----------
+  function showRelayMode(mode) {
+    for (const r of document.querySelectorAll('input[name="relay-mode"]')) r.checked = r.value === mode;
+    const ta = $('#in-relays');
+    ta.readOnly = mode === 'default';
+    ta.value = (mode === 'default' ? DEFAULT_RELAYS : state.relays).join('\n');
+    $('#relay-custom-note').hidden = mode !== 'custom';
+  }
+
+  function readRelayList() {
     const list = [...new Set($('#in-relays').value.split(/\s+/).map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean))];
     const bad = list.find((u) => !isWss(u));
-    if (bad) return toast(`Dirección no válida: ${bad} (debe empezar por wss://)`);
-    if (!list.length) return toast('Necesitas al menos un relay');
-    if (list.length > MAX_RELAYS) return toast(`Como mucho ${MAX_RELAYS} relays`);
+    if (bad) throw new Error(`Dirección no válida: ${bad} (debe empezar por wss://)`);
+    if (!list.length) throw new Error('Necesitas al menos un relay');
+    if (list.length > MAX_RELAYS) throw new Error(`Como mucho ${MAX_RELAYS} relays`);
+    return list;
+  }
+
+  // Prueba real: publica un evento de Susurro que caduca en 60 s y comprueba que el relay lo acepta
+  // y lo devuelve al pedirlo. Si no, ese relay no sirve para Susurro (o rechaza este tipo de eventos).
+  function testRelay(url) {
+    const randomTag = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
+    const ev = signEvent([['p', randomTag], ['expiration', String(nowSec() + 60)]], 'prueba de Susurro');
+    return new Promise((res) => {
+      let ws = null, done = false;
+      const finish = (ok, why) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try { ws?.close(); } catch {}
+        res({ ok, why });
+      };
+      const timer = setTimeout(() => finish(false, 'no responde'), 9000);
+      try { ws = new WebSocket(url); } catch { return finish(false, 'dirección no válida'); }
+      ws.onopen = () => ws.send(JSON.stringify(['EVENT', ev]));
+      ws.onmessage = (e) => {
+        let m;
+        try { m = JSON.parse(e.data); } catch { return; }
+        if (!Array.isArray(m)) return;
+        if (m[0] === 'OK' && m[1] === ev.id) {
+          if (m[2] !== true) return finish(false, String(m[3] || 'rechaza los mensajes').slice(0, 60));
+          ws.send(JSON.stringify(['REQ', 'prueba', { ids: [ev.id] }]));
+        } else if (m[0] === 'EVENT' && m[2]?.id === ev.id) finish(true);
+        else if (m[0] === 'EOSE') finish(false, 'acepta pero no devuelve los mensajes');
+      };
+      ws.onerror = () => finish(false, 'no se puede conectar');
+    });
+  }
+
+  async function testRelays() {
+    let list;
+    try { list = readRelayList(); } catch (e) { toast(e.message); return null; }
+    const ul = $('#relay-status');
+    ul.replaceChildren(...list.map((u) => h('li', { class: 'connecting' }, h('i'), `${u} · probando…`)));
+    const results = await Promise.all(list.map(testRelay));
+    ul.replaceChildren(...list.map((u, i) => h('li', { class: results[i].ok ? 'ok' : 'bad' }, h('i'),
+      `${u} · ${results[i].ok ? 'funciona' : results[i].why}`)));
+    return list.filter((u, i) => results[i].ok);
+  }
+
+  async function saveRelays() {
+    const mode = document.querySelector('input[name="relay-mode"]:checked')?.value || 'default';
+    let list = DEFAULT_RELAYS.slice();
+    if (mode === 'custom') {
+      let typed;
+      try { typed = readRelayList(); } catch (e) { return toast(e.message); }
+      const working = await testRelays();
+      if (!working) return;
+      if (!working.length) return toast('Ninguno de esos relays funciona con Susurro');
+      if (working.length < typed.length && !confirm(`${typed.length - working.length} de tus relays no funcionan con Susurro. ¿Guardar solo los ${working.length} que funcionan?`)) return;
+      list = working;
+      $('#in-relays').value = list.join('\n');
+    }
+    state.relayMode = mode;
     state.relays = list;
     save();
     pool.setRelays(list);
-    renderRelayStatus();
-    toast('Relays guardados');
+    if (mode === 'default') renderRelayStatus();
+    toast(mode === 'default' ? 'Usando los relays recomendados' : `Guardados ${list.length} relays`);
   }
 
   // ---------- Copias de seguridad ----------
@@ -1312,12 +1385,12 @@
   }
 
   async function makeBackup(pass) {
-    const { me, contacts, relays, since, relaySince, seenFloor } = state;
+    const { me, contacts, relays, relayMode, since, relaySince, seenFloor } = state;
     // Los mensajes temporales no se copian (deben desaparecer), ni la lista de vistos, que delataría
     // cuándo los hubo: al restaurar se reconstruye a partir de los mensajes copiados.
     const msgs = {};
     for (const [fpr, list] of Object.entries(state.msgs)) msgs[fpr] = list.filter((m) => !m.exp);
-    const data = { app: 'susurro', v: 1, me, contacts, msgs, relays, since, relaySince, seenFloor };
+    const data = { app: 'susurro', v: 1, me, contacts, msgs, relays, relayMode, since, relaySince, seenFloor };
     const armored = await openpgp.encrypt({
       message: await openpgp.createMessage({ text: JSON.stringify(data) }),
       passwords: [pass],
@@ -1374,7 +1447,8 @@
       ...freshState(),
       me: { name: cleanName(data.me.name), priv: data.me.priv, created: Number(data.me.created) || nowSec() },
       contacts, msgs, relaySince, seenFloor,
-      relays: relays.length ? relays : DEFAULT_RELAYS.slice(),
+      relayMode: data.relayMode === 'custom' && relays.length ? 'custom' : 'default',
+      relays: data.relayMode === 'custom' && relays.length ? relays.slice(0, MAX_RELAYS) : DEFAULT_RELAYS.slice(),
       since: Number(data.since) || nowSec() - 7 * 86400,
       // Los recibidos restaurados cuentan como vistos: los relays no los volverán a mostrar duplicados.
       seen: Object.entries(msgs).flatMap(([fpr, list]) => list.filter((m) => m.dir === 'in').map((m) => [fpr + ':' + m.id, m.ts])).slice(-SEEN_MAX),
@@ -1767,8 +1841,11 @@
       });
     });
     $('#btn-lock-now').addEventListener('click', lockNow);
-    $('#btn-relays-save').addEventListener('click', saveRelays);
-    $('#btn-relays-reset').addEventListener('click', () => { $('#in-relays').value = DEFAULT_RELAYS.join('\n'); });
+    $('#btn-relays-save').addEventListener('click', (e) => withBusy(e.currentTarget, 'Probando…', saveRelays));
+    $('#btn-relays-test').addEventListener('click', (e) => withBusy(e.currentTarget, 'Probando…', testRelays));
+    for (const r of document.querySelectorAll('input[name="relay-mode"]')) {
+      r.addEventListener('change', () => { showRelayMode(r.value); $('#relay-status').replaceChildren(); });
+    }
     $('#btn-wipe').addEventListener('click', () => {
       if (!confirm('¿Borrar tu identidad, contactos y mensajes de este dispositivo?\n\nSi no tienes copia de seguridad perderás tu identidad para siempre.')) return;
       wipe();

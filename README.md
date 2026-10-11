@@ -93,7 +93,7 @@ Netlify inyecta en las páginas su propio script (`/.netlify/scripts/hud`, una i
 ### En cualquier caso
 
 - Abre la dirección en el móvil e instálala.
-- **Al publicar cambios, cambia siempre el valor de `CACHE` en `public/sw.js`** (por ejemplo `susurro-v5`). La app se sirve desde la caché del dispositivo: sin ese cambio nadie verá la versión nueva. Con él, la versión nueva se descarga entera en segundo plano y aparece el aviso «Hay una versión nueva de Susurro» con el botón «Actualizar»; si no se pulsa, se aplica en el siguiente arranque.
+- **Al publicar cambios, cambia siempre el valor de `CACHE` en `public/sw.js`** (por ejemplo `susurro-v6`). La app se sirve desde la caché del dispositivo: sin ese cambio nadie verá la versión nueva. Con él, la versión nueva se descarga entera en segundo plano y aparece el aviso «Hay una versión nueva de Susurro» con el botón «Actualizar»; si no se pulsa, se aplica en el siguiente arranque.
 - **Cada dirección tiene su propio almacenamiento.** Si cambias de dirección (otro nombre en Netlify, o pasar a tu dominio), la app empieza vacía y los enlaces de invitación antiguos apuntan a la dirección vieja. Para conservar tu identidad, haz una copia de seguridad en la vieja y restáurala en la nueva.
 
 ## Desarrollo local
@@ -109,7 +109,11 @@ El service worker sirve la app desde su caché, así que tras editar un archivo 
 ## Ajustes
 
 - **Contraseña de acceso:** Ajustes → «Cambiar contraseña» (pide la actual). «Bloquear ahora» cierra la sesión al momento.
-- **Relays:** Ajustes → Relays, uno por línea (`wss://…`, como mucho 15). Por defecto, 10 comprobados que aceptan los mensajes de Susurro y borran los caducados: `relay.damus.io`, `nos.lol`, `offchain.pub`, `nostr.mom`, `relay.nostr.net`, `nostr.oxtr.dev`, `nostr-pub.wellorder.net`, `nostr.bitcoiner.social`, `purplerelay.com` y `relay.primal.net`. Solo se envía a relays que estén en tu lista (un contacto no puede llevarte a un relay suyo para ver tu IP); ambas personas deben compartir al menos uno.
+- **Relays:** Ajustes → Relays. Hay dos opciones:
+  - **Recomendados** (por defecto): 10 relays comprobados que aceptan los mensajes de Susurro y borran los caducados (`relay.damus.io`, `nos.lol`, `offchain.pub`, `nostr.mom`, `relay.nostr.net`, `nostr.oxtr.dev`, `nostr-pub.wellorder.net`, `nostr.bitcoiner.social`, `purplerelay.com` y `relay.primal.net`). Se actualizan solos con cada versión de la app.
+  - **Mi propia lista:** los que tú elijas, uno por línea (`wss://…`, como mucho 15). «Probar relays» comprueba cada uno de verdad (publica un mensaje de prueba que caduca en 60 segundos y verifica que el relay lo acepta y lo devuelve) y dice por qué falla el que no sirve. Al guardar solo se quedan los que funcionan. **Tus contactos deben tener al menos uno de tus relays en su lista**; si no, no te llegarán sus mensajes.
+
+  En los dos casos solo se envía a relays que estén en tu lista: un contacto no puede llevarte a un relay suyo para ver tu IP.
 - **Borrar todo:** Ajustes → Zona peligrosa. Elimina identidad, contactos y mensajes de ese dispositivo. Si olvidas la contraseña, la pantalla de bloqueo ofrece lo mismo para empezar de nuevo o restaurar una copia.
 
 ## Estructura

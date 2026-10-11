@@ -275,12 +275,17 @@
       </section>
       <section>
         <h3>Relays</h3>
-        <p class="muted">Servidores Nostr por los que viajan los mensajes cifrados: escuchas en todos y cada mensaje sale por 3 elegidos al azar. Los borran a los 7 días como mucho. Uno por línea (máximo 15).</p>
-        <textarea id="in-relays" rows="5" spellcheck="false"></textarea>
+        <p class="muted">Servidores Nostr por los que viajan los mensajes cifrados: escuchas en todos y cada mensaje sale por 3 elegidos al azar. Los borran a los 7 días como mucho.</p>
+        <div class="choice" role="radiogroup" aria-label="Lista de relays">
+          <label><input type="radio" name="relay-mode" value="default"> <span><strong>Recomendados</strong><small>10 relays comprobados; se actualizan con la app.</small></span></label>
+          <label><input type="radio" name="relay-mode" value="custom"> <span><strong>Mi propia lista</strong><small>Los que tú elijas, uno por línea (máximo 15).</small></span></label>
+        </div>
+        <textarea id="in-relays" rows="6" spellcheck="false" aria-label="Lista de relays"></textarea>
+        <p id="relay-custom-note" class="warn" hidden>Tus contactos deben tener al menos uno de estos relays en su lista; si no, no te llegarán sus mensajes.</p>
         <ul id="relay-status" class="relay-status"></ul>
         <div class="row">
-          <button class="btn small" id="btn-relays-save" type="button">Guardar relays</button>
-          <button class="btn small ghost" id="btn-relays-reset" type="button">Restablecer</button>
+          <button class="btn small" id="btn-relays-test" type="button">Probar relays</button>
+          <button class="btn small primary" id="btn-relays-save" type="button">Guardar</button>
         </div>
       </section>
       <section>

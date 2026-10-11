@@ -3,7 +3,7 @@
 // La caché es por versión: al publicar cambios hay que cambiar CACHE. El navegador detecta que
 // sw.js es distinto, descarga todos los archivos de golpe y la versión nueva espera: se aplica entera
 // cuando el usuario pulsa «Actualizar» o en el siguiente arranque. Así nunca se mezclan versiones.
-const CACHE = 'susurro-v4';
+const CACHE = 'susurro-v5';
 const ASSETS = [
   './', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',
