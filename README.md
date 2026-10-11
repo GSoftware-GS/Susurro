@@ -32,13 +32,14 @@ Susurro funciona en una sola ventana a la vez por dispositivo: si se abre en otr
 ## Cómo funciona
 
 ```
-Tu móvil ──(firma + cifra con OpenPGP)──► 5 relays Nostr públicos ──► móvil del destinatario
+Tu móvil ──(firma + cifra con OpenPGP)──► 3 de 10 relays Nostr, al azar ──► móvil del destinatario
                                                                       (descifra + verifica firma)
 ```
 
 - **Cifrado:** OpenPGP.js 6 con claves ed25519/cv25519, compatibles con GnuPG. Cada mensaje se firma con tu clave y se cifra para el destinatario sin indicar a quién va (`wildcard`: no aparece el ID de su clave).
 - **Contenido cifrado:** un JSON con el texto, la fecha, un identificador único, el temporizador, tu clave pública (para que puedan responderte aunque aún no te tengan) y la huella del destinatario, rellenado hasta múltiplos de 512 bytes para no delatar la longitud. Al incluir la huella del destinatario, nadie puede reenviar a otra persona un mensaje firmado por ti.
-- **Transporte:** cada mensaje es un evento Nostr (`kind` 4242) que se publica a la vez en todos los relays configurados, con su etiqueta de caducidad (`expiration`). Cada evento va firmado con una clave Nostr desechable, de modo que la firma no identifica a quien envía. El destinatario se identifica con la etiqueta `p` = `sha256("susurro:" + huella)`. El ✓ aparece cuando lo han aceptado al menos dos relays (o todos los que respondieron, si son menos).
+- **Transporte:** cada mensaje es un evento Nostr (`kind` 4242) con su etiqueta de caducidad (`expiration`). Sale por **3 relays elegidos al azar** (cada vez otros) de entre los que escucha el destinatario y también están en tu lista, por una **conexión nueva y aparte** que se cierra al terminar y tras una **espera aleatoria** de unos segundos: ningún relay ve todos tus envíos ni los ve en la misma conexión en la que escuchas. Cada evento va firmado con una clave Nostr desechable. El ✓ aparece cuando lo han aceptado al menos dos; si no, se reintenta con otros al azar.
+- **Etiquetas secretas que cambian cada día:** el primer mensaje a alguien va a su etiqueta pública `sha256("susurro:" + huella)`. Dentro de cada mensaje cifrado, cada uno le da al otro un secreto propio de esa conversación; a partir de ahí los mensajes van a una etiqueta calculada con ese secreto y el día (HMAC-SHA256), distinta cada día. Para los relays son valores aleatorios: no se pueden asociar a tu clave pública ni contar cuántos mensajes recibes, y la etiqueta pública solo recibe solicitudes nuevas. Los mensajes también llevan la lista de relays donde escucha cada uno.
 - **Recepción:** la app escucha esa etiqueta en todos los relays y procesa los eventos de uno en uno: descarta los caducados, verifica el evento Nostr, exige exactamente un destinatario, descifra con límite de tamaño descomprimido, exige una firma válida de la clave que viaja dentro (tolerando relojes hasta 10 minutos adelantados) y descarta duplicados y repeticiones. Cada relay continúa desde el último histórico completo que entregó (señal `EOSE`), con 2 días de margen; mientras una petición devuelva eventos se piden también los anteriores, hasta una vacía, para que inundar tu etiqueta no oculte mensajes.
 - **Temporizadores:** solo se aceptan los valores de la app (5 min, 1 h, 1 día, 1 semana o desactivado), y un mensaje solo cambia el temporizador del chat si es más reciente que el último cambio, aunque los relays los entreguen desordenados.
 - **Desconocidos:** se guardan como máximo 20 solicitudes pendientes, con 3 mensajes de 1.000 caracteres cada una y sin enlaces; lo demás se descarta hasta que aceptes o bloquees. De un contacto bloqueado solo se guarda la huella. Si una solicitud usa un nombre que se ve igual que el de un contacto (también con letras cirílicas o griegas que imitan a las latinas), la app avisa de posible suplantación.
@@ -58,7 +59,7 @@ Se han hecho cuatro auditorías independientes (criptografía y protocolo, aplic
 **Limitaciones que conviene conocer:**
 - **Con la app desbloqueada, el dispositivo manda.** Un malware o una extensión maliciosa del navegador puede leer lo que la app tiene abierto. Mantén el sistema actualizado y no instales extensiones dudosas.
 - **Mensajes temporales:** nadie puede impedir que la otra persona haga una captura de pantalla o use una versión modificada de la app que no borre nada. Un relay que no respete la caducidad podría conservar el texto cifrado.
-- **Metadatos:** quien conozca tu clave pública puede calcular tu etiqueta y ver en los relays cuántos mensajes recibes y cuándo. Los relays ven tu IP, y como envías y recibes por la misma conexión, un relay podría deducir con quién hablas. El tipo de evento (4242) delata que usas Susurro. Usa una VPN o Tor si te preocupa.
+- **Tu IP:** los relays a los que te conectas la ven, y escuchas en todos los de tu lista a la vez, así que un relay podría relacionar por IP tus etiquetas (la pública y las secretas) y tus envíos. Las etiquetas diarias, los relays al azar y las conexiones aparte impiden seguir tus conversaciones mirando los relays, pero **solo una VPN o Tor oculta quién eres**. El tipo de evento (4242) delata que usas Susurro, y quien tenga tu clave pública puede contar las solicitudes nuevas que recibes (no los mensajes de tus chats).
 - **Sin secreto hacia delante ni negabilidad:** si alguien roba tu clave privada, podría descifrar mensajes antiguos que haya guardado de los relays antes de que caducaran. Y como los mensajes van firmados, el destinatario puede demostrar a terceros que los escribiste tú. Son propiedades de PGP.
 - **Confianza en el primer uso:** la primera clave que recibes de alguien se acepta tal cual y cualquiera puede ponerse cualquier nombre. Solo comparar huellas por otra vía protege de verdad. Si un contacto cambia de clave, aparece como un contacto nuevo; no se gestiona la revocación de claves robadas.
 - **Entrega no garantizada:** depende de relays públicos que pueden filtrar, retrasar o borrar eventos. ✓ significa «aceptado por los relays», no «leído». Un mensaje a alguien que pase más de 7 días sin abrir la app se pierde.
@@ -92,7 +93,7 @@ Netlify inyecta en las páginas su propio script (`/.netlify/scripts/hud`, una i
 ### En cualquier caso
 
 - Abre la dirección en el móvil e instálala.
-- **Al publicar cambios, cambia siempre el valor de `CACHE` en `public/sw.js`** (por ejemplo `susurro-v4`). La app se sirve desde la caché del dispositivo: sin ese cambio nadie verá la versión nueva. Con él, la versión nueva se descarga entera en segundo plano y aparece el aviso «Hay una versión nueva de Susurro» con el botón «Actualizar»; si no se pulsa, se aplica en el siguiente arranque.
+- **Al publicar cambios, cambia siempre el valor de `CACHE` en `public/sw.js`** (por ejemplo `susurro-v5`). La app se sirve desde la caché del dispositivo: sin ese cambio nadie verá la versión nueva. Con él, la versión nueva se descarga entera en segundo plano y aparece el aviso «Hay una versión nueva de Susurro» con el botón «Actualizar»; si no se pulsa, se aplica en el siguiente arranque.
 - **Cada dirección tiene su propio almacenamiento.** Si cambias de dirección (otro nombre en Netlify, o pasar a tu dominio), la app empieza vacía y los enlaces de invitación antiguos apuntan a la dirección vieja. Para conservar tu identidad, haz una copia de seguridad en la vieja y restáurala en la nueva.
 
 ## Desarrollo local
@@ -108,7 +109,7 @@ El service worker sirve la app desde su caché, así que tras editar un archivo 
 ## Ajustes
 
 - **Contraseña de acceso:** Ajustes → «Cambiar contraseña» (pide la actual). «Bloquear ahora» cierra la sesión al momento.
-- **Relays:** Ajustes → Relays, uno por línea (`wss://…`). Por defecto: `relay.damus.io`, `nos.lol`, `offchain.pub`, `nostr.mom` y `relay.nostr.net`. Ambas personas deben compartir al menos un relay.
+- **Relays:** Ajustes → Relays, uno por línea (`wss://…`, como mucho 15). Por defecto, 10 comprobados que aceptan los mensajes de Susurro y borran los caducados: `relay.damus.io`, `nos.lol`, `offchain.pub`, `nostr.mom`, `relay.nostr.net`, `nostr.oxtr.dev`, `nostr-pub.wellorder.net`, `nostr.bitcoiner.social`, `purplerelay.com` y `relay.primal.net`. Solo se envía a relays que estén en tu lista (un contacto no puede llevarte a un relay suyo para ver tu IP); ambas personas deben compartir al menos uno.
 - **Borrar todo:** Ajustes → Zona peligrosa. Elimina identidad, contactos y mensajes de ese dispositivo. Si olvidas la contraseña, la pantalla de bloqueo ofrece lo mismo para empezar de nuevo o restaurar una copia.
 
 ## Estructura

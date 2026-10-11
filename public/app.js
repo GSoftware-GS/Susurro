@@ -6,7 +6,17 @@
   const TAG_PREFIX = 'susurro:';        // etiqueta #p = sha256(TAG_PREFIX + huella del destinatario)
   const SUB_ID = 'susurro';
   const BACKFILL_ID = 'susurro-old';    // suscripción auxiliar para pedir históricos que no cupieron
-  const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://offchain.pub', 'wss://nostr.mom', 'wss://relay.nostr.net'];
+  // Relays comprobados: aceptan los eventos de Susurro y borran los caducados (NIP-40).
+  const DEFAULT_RELAYS = [
+    'wss://relay.damus.io', 'wss://nos.lol', 'wss://offchain.pub', 'wss://nostr.mom', 'wss://relay.nostr.net',
+    'wss://nostr.oxtr.dev', 'wss://nostr-pub.wellorder.net', 'wss://nostr.bitcoiner.social', 'wss://purplerelay.com', 'wss://relay.primal.net',
+  ];
+  const OLD_DEFAULT_RELAYS = 'wss://relay.damus.io wss://nos.lol wss://offchain.pub wss://nostr.mom wss://relay.nostr.net';
+  const MAX_RELAYS = 15;
+  const SEND_RELAYS = 3;                // cada mensaje sale por 3 relays elegidos al azar
+  const SEND_DELAY_MS = [500, 3000];    // espera aleatoria antes de enviar (dificulta casar envío y recepción)
+  const TAG_DAYS = 9;                   // días de etiquetas secretas que se escuchan (caducidad + margen)
+  const MAX_SUB_TAGS = 300;             // etiquetas por suscripción como mucho
   const MAX_TEXT = 8000;
   const PENDING_TEXT = 1000;            // texto guardado de mensajes de desconocidos
   const MAX_EVENT_CHARS = 100000;
@@ -67,6 +77,9 @@
   let eventQueue = Promise.resolve();
   let saveChain = Promise.resolve();
   let seen = new Set();
+  let subTags = [];             // etiquetas que escucho: la pública y las secretas de cada chat
+  let myTags = new Set();
+  let tagDay = 0;
   const keyCache = new Map();
   const evSeen = new Set();
   const inflight = new Set();
@@ -111,6 +124,32 @@
     return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, '0')).join('');
   }
   const tagFor = (fpr) => sha256hex(TAG_PREFIX + fpr.toLowerCase());
+
+  // Etiquetas secretas por conversación: cada uno da al otro (dentro del mensaje cifrado) un secreto
+  // de 32 bytes, y quien escribe calcula con él una etiqueta distinta cada día (HMAC del número de día).
+  // Los relays solo ven valores aleatorios que cambian a diario y no se pueden asociar a tu clave pública.
+  const dayOf = (sec) => Math.floor(sec / 86400);
+  const newSecret = () => b64u.enc(crypto.getRandomValues(new Uint8Array(32)));
+  const isSecret = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{43}$/.test(s);
+  const hmacKeys = new Map(), tagCache = new Map();
+  async function pairTag(secret, day) {
+    const id = secret + ':' + day;
+    if (!tagCache.has(id)) {
+      let k = hmacKeys.get(secret);
+      if (!k) {
+        k = await crypto.subtle.importKey('raw', b64u.dec(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+        hmacKeys.set(secret, k);
+      }
+      const sig = await crypto.subtle.sign('HMAC', k, new TextEncoder().encode('susurro-tag:' + day));
+      tagCache.set(id, Array.from(new Uint8Array(sig), (b) => b.toString(16).padStart(2, '0')).join(''));
+    }
+    return tagCache.get(id);
+  }
+
+  // Aleatoriedad criptográfica para elegir relays y esperas.
+  const randInt = (n) => crypto.getRandomValues(new Uint32Array(1))[0] % n;
+  const shuffle = (arr) => { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = randInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const fmtFpr = (fpr) => {
     const g = fpr.toUpperCase().match(/.{1,4}/g) || [];
@@ -245,6 +284,8 @@
     if (!s.seenFloor || typeof s.seenFloor !== 'object' || Array.isArray(s.seenFloor)) s.seenFloor = {};
     if (!Array.isArray(s.seen)) s.seen = [];
     if (!s.relaySince || typeof s.relaySince !== 'object') s.relaySince = {};
+    // Quien tenía la lista antigua de 5 relays pasa a la nueva (más relays entre los que repartir).
+    if (Array.isArray(s.relays) && s.relays.join(' ') === OLD_DEFAULT_RELAYS) s.relays = DEFAULT_RELAYS.slice();
     return s;
   }
 
@@ -431,6 +472,9 @@
     if (p.t !== undefined && p.t !== 'timer') return null;
     p.ttl = p.ttl ?? 0;
     if (!TTLS.has(p.ttl)) return null;
+    // Secreto con el que debo escribirle (rk) y relays donde escucha (rl). Opcionales: versiones antiguas no los mandan.
+    if (p.rk !== undefined && !isSecret(p.rk)) return null;
+    p.rl = Array.isArray(p.rl) ? p.rl.filter((u) => typeof u === 'string' && u.length < 200 && isWss(u)).slice(0, MAX_RELAYS) : [];
     const senderKey = await openpgp.readKey({ binaryKey: b64u.dec(p.key) });
     if (senderKey.isPrivate()) return null;
     // Segunda pasada: exige una firma válida hecha con la clave que viene dentro.
@@ -456,7 +500,6 @@
       this.reqAt = 0;
       this.page = null;
       this.closed = false;
-      this.waiting = new Map();
     }
     connect() {
       clearTimeout(this.timer);
@@ -494,8 +537,6 @@
       this.ws = null;
       this.status = 'off';
       this.page = null;
-      for (const w of this.waiting.values()) w.resolve(null);
-      this.waiting.clear();
       if (ws && ws.readyState <= 1) ws.close();
       this.pool.changed();
     }
@@ -540,16 +581,6 @@
       if (this.page?.sub === BACKFILL_ID) this.send(['CLOSE', BACKFILL_ID]);
       this.page = null;
     }
-    publish(ev) {
-      if (this.waiting.has(ev.id)) return this.waiting.get(ev.id).promise;
-      let resolve;
-      const promise = new Promise((r) => { resolve = r; });
-      if (!this.send(['EVENT', ev])) return Promise.resolve(null);
-      const timer = setTimeout(() => done(null), 10000);
-      const done = (ok) => { clearTimeout(timer); this.waiting.delete(ev.id); resolve(ok); };
-      this.waiting.set(ev.id, { promise, resolve: done });
-      return promise;
-    }
     onMessage(data) {
       if (typeof data !== 'string' || data.length > MAX_FRAME) return;
       let m;
@@ -564,8 +595,6 @@
         this.pool.onEvent(m[2]);
       } else if (m[0] === 'EOSE' && this.page && m[1] === this.page.sub) {
         this.onEose();
-      } else if (m[0] === 'OK') {
-        this.waiting.get(m[1])?.resolve(m[2] === true || /^duplicate/i.test(String(m[3] || '')));
       } else if (m[0] === 'CLOSED' && m[1] === SUB_ID) {
         clearTimeout(this.subTimer);
         this.subTimer = setTimeout(() => this.subscribe(), 60000);
@@ -600,32 +629,80 @@
       for (const r of this.relays.values()) if (r.status === 'open') open++;
       return { open, total: this.relays.size };
     }
-    // true: aceptado por al menos dos relays (o por todos los que respondieron) ·
-    // false: todos lo rechazaron · null: sin respuesta suficiente (se reintentará)
-    publish(ev) {
-      const open = [...this.relays.values()].filter((r) => r.status === 'open');
-      if (!open.length) return Promise.resolve(null);
-      const need = Math.min(2, open.length);
-      return new Promise((res) => {
-        let pending = open.length, accepted = 0, rejected = 0, done = false;
-        const finish = (v) => { if (!done) { done = true; res(v); } };
-        for (const r of open) {
-          r.publish(ev).then((ok) => {
-            pending--;
-            if (ok === true) accepted++;
-            else if (ok === false) rejected++;
-            if (accepted >= need) finish(true);
-            else if (pending === 0) finish(rejected === open.length ? false : accepted && accepted + rejected === open.length ? true : null);
-          });
-        }
-      });
+    resubscribe() {
+      for (const r of this.relays.values()) if (r.status === 'open') r.subscribe();
     }
+  }
+
+  // Envío por una conexión nueva y aparte, que se cierra al recibir la respuesta: así el relay no
+  // ve el envío en la misma conexión en la que escuchas tus etiquetas.
+  function publishOnce(url, ev) {
+    return new Promise((res) => {
+      let ws = null, done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try { ws?.close(); } catch {}
+        res(v);
+      };
+      const timer = setTimeout(() => finish(null), 10000);
+      try { ws = new WebSocket(url); } catch { return finish(null); }
+      ws.onopen = () => ws.send(JSON.stringify(['EVENT', ev]));
+      ws.onmessage = (e) => {
+        if (typeof e.data !== 'string' || e.data.length > 10000) return;
+        let m;
+        try { m = JSON.parse(e.data); } catch { return; }
+        if (Array.isArray(m) && m[0] === 'OK' && m[1] === ev.id) finish(m[2] === true || /^duplicate/i.test(String(m[3] || '')));
+      };
+      ws.onerror = () => finish(null);
+      ws.onclose = () => finish(null);
+    });
+  }
+
+  // Cada mensaje sale por SEND_RELAYS relays elegidos al azar entre los que escucha el destinatario,
+  // tras una espera aleatoria. true: aceptado por al menos dos (o por todos si son menos) ·
+  // false: todos lo rechazaron · null: sin respuesta suficiente (se reintentará con otros al azar).
+  async function publishRandom(ev, targets) {
+    const pick = shuffle(targets).slice(0, SEND_RELAYS);
+    if (!pick.length || !navigator.onLine) return null;
+    await sleep(SEND_DELAY_MS[0] + randInt(SEND_DELAY_MS[1] - SEND_DELAY_MS[0]));
+    const results = await Promise.all(pick.map((u) => publishOnce(u, ev)));
+    const accepted = results.filter((r) => r === true).length;
+    if (accepted >= Math.min(2, pick.length)) return true;
+    return results.every((r) => r === false) ? false : null;
+  }
+
+  // Relays a los que enviar a un contacto: los que él escucha Y están en mi lista (así un contacto no
+  // puede llevarme a un relay suyo para ver mi IP). Si no coinciden en ninguno, los míos.
+  function targetsFor(c) {
+    const common = (c.relays || []).filter((u) => state.relays.includes(u));
+    return common.length ? common : state.relays;
+  }
+
+  // Recalcula las etiquetas que escucho: la pública (para solicitudes nuevas) y, por cada chat,
+  // la secreta de los últimos días (los mensajes caducan a los 7 días) y la de mañana (relojes adelantados).
+  async function refreshTags() {
+    if (!state?.me?.tag) return;
+    const today = dayOf(nowSec());
+    const since = Math.min(state.since, ...Object.values(state.relaySince)) - SINCE_MARGIN;
+    const first = Math.max(dayOf(since), today - TAG_DAYS);
+    const tags = [state.me.tag];
+    for (const c of Object.values(state.contacts)) {
+      if (c.status === 'blocked' || !isSecret(c.inSecret)) continue;
+      for (let d = today + 1; d >= first && tags.length < MAX_SUB_TAGS; d--) tags.push(await pairTag(c.inSecret, d));
+    }
+    tagDay = today;
+    const changed = tags.join() !== subTags.join();
+    subTags = tags;
+    myTags = new Set(tags);
+    if (changed) pool?.resubscribe();
   }
 
   // Cada relay sigue desde donde terminó su último histórico completo (EOSE), con margen.
   function subscriptionFilter(url) {
     const base = state.relaySince[url] ?? state.since;
-    return { kinds: [KIND], '#p': [state.me.tag], since: Math.max(0, base - SINCE_MARGIN), limit: SUB_LIMIT };
+    return { kinds: [KIND], '#p': subTags.length ? subTags : [state.me.tag], since: Math.max(0, base - SINCE_MARGIN), limit: SUB_LIMIT };
   }
 
   function onEose(url, reqAt) {
@@ -656,7 +733,7 @@
 
   async function handleEvent(ev) {
     if (!state?.me || halted || typeof ev.id !== 'string' || evSeen.has(ev.id)) return;
-    if (ev.kind !== KIND || !Array.isArray(ev.tags) || !ev.tags.some((t) => Array.isArray(t) && t[0] === 'p' && t[1] === state.me.tag)) return;
+    if (ev.kind !== KIND || !Array.isArray(ev.tags) || !ev.tags.some((t) => Array.isArray(t) && t[0] === 'p' && myTags.has(t[1]))) return;
     const expiration = ev.tags.find((t) => Array.isArray(t) && t[0] === 'expiration');
     if (expiration && Number(expiration[1]) < nowSec()) return; // NIP-40: ya caducado
     if (!NostrTools.verifyEvent(ev)) return;
@@ -682,6 +759,12 @@
       return;
     }
     markSeen(key, ts);
+    // Dónde y cómo escribirle a partir de ahora: su etiqueta secreta y los relays que escucha.
+    if (p.rk && ts >= (c.routeAt || 0)) {
+      c.outSecret = p.rk;
+      if (p.rl.length) c.relays = p.rl;
+      c.routeAt = ts;
+    }
     // El temporizador lo fija quien escribe: cada mensaje lleva el suyo y el chat se sincroniza.
     // Solo cuenta si el mensaje es posterior al último cambio (los relays pueden entregarlos desordenados).
     if (ts >= (c.ttlAt || 0) && (c.ttl || 0) !== p.ttl) {
@@ -707,10 +790,20 @@
 
   async function buildEvent(fpr, extra) {
     const c = state.contacts[fpr];
+    // Mi secreto para este chat: se lo doy en cada mensaje para que me conteste por etiquetas secretas.
+    if (!isSecret(c.inSecret)) {
+      c.inSecret = newSecret();
+      await refreshTags(); // escucho ya la etiqueta nueva antes de que pueda contestar
+    }
     const ttl = c.ttl || 0;
-    const payload = { v: 1, id: crypto.randomUUID(), ts: Date.now(), to: fpr, key: myPubB64, text: '', ttl, ...extra };
+    const payload = {
+      v: 1, id: crypto.randomUUID(), ts: Date.now(), to: fpr, key: myPubB64, text: '', ttl,
+      rk: c.inSecret, rl: state.relays.slice(0, MAX_RELAYS), ...extra,
+    };
+    // Su etiqueta secreta de hoy si ya me la dio; si no (primer mensaje), su etiqueta pública.
+    const tag = isSecret(c.outSecret) ? await pairTag(c.outSecret, dayOf(nowSec())) : await tagFor(fpr);
     // NIP-40: los relays borran el evento al caducar (el tiempo del temporizador o RELAY_TTL).
-    const tags = [['p', await tagFor(fpr)], ['expiration', String(nowSec() + (ttl || RELAY_TTL))]];
+    const tags = [['p', tag], ['expiration', String(nowSec() + (ttl || RELAY_TTL))]];
     return { payload, ttl, ev: signEvent(tags, await encryptFor(c, payload)) };
   }
 
@@ -743,7 +836,8 @@
   }
 
   function publishMsg(fpr, m) {
-    if (!pool || !m.ev || inflight.has(m.id)) return;
+    const c = state.contacts[fpr];
+    if (!pool || !m.ev || !c || inflight.has(m.id)) return;
     // Un pendiente antiguo se firma de nuevo con fecha actual para que entre en el filtro del destinatario.
     // Si no es temporal, también se renueva su caducidad (los temporales conservan la suya).
     if (!Number.isFinite(m.ev.created_at) || nowSec() - m.ev.created_at > RESIGN_AFTER) {
@@ -751,7 +845,7 @@
       m.ev = signEvent(tags, m.ev.content);
     }
     inflight.add(m.id);
-    pool.publish(m.ev).then((ok) => {
+    publishRandom(m.ev, targetsFor(c)).then((ok) => {
       inflight.delete(m.id);
       if (m.st === 'sent') return;
       if (ok === true) { m.st = 'sent'; delete m.ev; }
@@ -1194,6 +1288,7 @@
     const bad = list.find((u) => !isWss(u));
     if (bad) return toast(`Dirección no válida: ${bad} (debe empezar por wss://)`);
     if (!list.length) return toast('Necesitas al menos un relay');
+    if (list.length > MAX_RELAYS) return toast(`Como mucho ${MAX_RELAYS} relays`);
     state.relays = list;
     save();
     pool.setRelays(list);
@@ -1246,7 +1341,13 @@
         fpr: c.fpr, name: cleanName(c.name), status: blocked ? 'blocked' : c.status === 'ok' ? 'ok' : 'pending',
         added: okTs(c.added) ? c.added : Date.now(), lastTs: okTs(c.lastTs) ? c.lastTs : 0, unread: 0,
         verified: c.verified === true, ttl: TTLS.has(c.ttl) ? c.ttl : 0, ttlAt: okTs(c.ttlAt) ? c.ttlAt : 0,
-        ...(blocked ? {} : { pub: c.pub }),
+        ...(blocked ? {} : {
+          pub: c.pub,
+          inSecret: isSecret(c.inSecret) ? c.inSecret : undefined,
+          outSecret: isSecret(c.outSecret) ? c.outSecret : undefined,
+          relays: Array.isArray(c.relays) ? c.relays.filter((u) => str(u) && isWss(u)).slice(0, MAX_RELAYS) : [],
+          routeAt: okTs(c.routeAt) ? c.routeAt : 0,
+        }),
       };
     }
     const msgs = {};
@@ -1418,7 +1519,13 @@
     showScreen('#app');
     pool ||= new Pool({ filter: subscriptionFilter, onEvent: onRelayEvent, onEose, onOpen: flushOutbox, onChange: renderNet });
     pool.setRelays(state.relays);
-    if (!timers.length) timers = [setInterval(flushOutbox, 30000), setInterval(sweepExpired, 5000)];
+    if (!timers.length) {
+      timers = [
+        setInterval(flushOutbox, 30000),
+        setInterval(sweepExpired, 5000),
+        setInterval(() => { if (dayOf(nowSec()) !== tagDay) refreshTags(); }, 60000), // etiquetas del día nuevo
+      ];
+    }
     sweepExpired();
     renderList();
     renderNet();
@@ -1428,6 +1535,7 @@
 
   async function enter() {
     state.me.tag = await tagFor(state.me.fpr);
+    await refreshTags();
     await flushSave();
     navigator.storage?.persist?.().catch(() => {});
     startApp();
@@ -1559,6 +1667,7 @@
       state.contacts[c.fpr] = { fpr: c.fpr, name: c.name, status: 'blocked', added: c.added, unread: 0 };
       delete state.msgs[c.fpr];
       keyCache.delete(c.fpr);
+      refreshTags(); // deja de escuchar sus etiquetas secretas
       save();
       leaveChat();
     });
@@ -1620,6 +1729,7 @@
       delete state.contacts[c.fpr];
       delete state.msgs[c.fpr];
       keyCache.delete(c.fpr);
+      refreshTags();
       save();
       $('#dlg-contact').close();
       leaveChat();
