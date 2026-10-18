@@ -6,7 +6,7 @@
 # IMPORTANTE: si cambias el nombre del sitio o usas un dominio propio, cambia aquí el dominio;
 # si no, la app no cargará.
 /*
-  Content-Security-Policy: default-src 'none'; script-src https://susurro-chat.netlify.app/app.js https://susurro-chat.netlify.app/vendor/ 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' wss:; manifest-src 'self'; media-src 'self' blob: mediastream:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types susurro
+  Content-Security-Policy: default-src 'none'; script-src https://susurro-chat.netlify.app/app.js https://susurro-chat.netlify.app/vendor/ 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' wss: ws://*.onion:* http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion https://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion http://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion; manifest-src 'self'; media-src 'self' blob: mediastream:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types susurro
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer

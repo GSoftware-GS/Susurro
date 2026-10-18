@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' wss:; manifest-src 'self'; worker-src 'self'; media-src 'self' blob: mediastream:; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types susurro">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' wss: ws://*.onion:* http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion https://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion http://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion; manifest-src 'self'; worker-src 'self'; media-src 'self' blob: mediastream:; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types susurro">
   <meta name="referrer" content="no-referrer">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
@@ -274,6 +274,16 @@
           <button class="btn ghost small" id="btn-gen-pass" type="button">Generar una contraseña segura</button>
           <button class="btn" type="submit"><svg class="ic"><use href="#i-download"/></svg> Guardar copia cifrada</button>
         </form>
+      </section>
+      <section>
+        <h3>Red y Tor</h3>
+        <p class="muted">Los relays ven la dirección IP desde la que te conectas. Tor la oculta.</p>
+        <div class="choice" role="radiogroup" aria-label="Conexión">
+          <label><input type="radio" name="net-mode" value="direct"> <span><strong>Conexión directa</strong><small>Los relays ven tu IP, salvo que uses una VPN u Orbot.</small></span></label>
+          <label><input type="radio" name="net-mode" value="tor"> <span><strong>Solo a través de Tor</strong><small>No se conecta a nada hasta comprobar que hay Tor, y usa la dirección .onion de los relays que la tienen. Ábrela en Tor Browser con el nivel de seguridad «Estándar». Tor Browser borra los datos al cerrarse: guarda una copia de seguridad para restaurarla al volver.</small></span></label>
+        </div>
+        <p id="tor-status" class="fine left" hidden></p>
+        <button class="btn small" id="btn-tor-check" type="button" hidden>Comprobar Tor</button>
       </section>
       <section>
         <h3>Relays</h3>

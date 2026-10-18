@@ -332,7 +332,7 @@ dialog[open] { animation: sheet-in .2s ease-out; }
 .choice { display: grid; gap: 8px; }
 .choice label { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; font-weight: 400; }
 .choice label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
-.choice input { margin-top: 3px; accent-color: var(--accent); }
+.choice input { margin-top: 3px; accent-color: var(--accent); flex: none; width: auto; }
 .choice span { display: flex; flex-direction: column; gap: 2px; }
 .choice small { color: var(--muted); font-size: 13px; }
 textarea[readonly] { opacity: .7; }
