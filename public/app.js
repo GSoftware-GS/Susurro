@@ -2,7 +2,9 @@
 // Susurro: chat cifrado con OpenPGP que viaja por relays Nostr. Todo ocurre en el navegador.
 (() => {
   const STORE_KEY = 'susurro.v1';
-  const KIND = 4242;                    // tipo de evento Nostr propio de Susurro
+  const KIND = 4242;                    // tipo de evento Nostr propio de Susurro (formato clásico)
+  const KIND_V2 = 1059;                 // formato camuflado: el de los mensajes privados estándar de Nostr (NIP-59)
+  const WIRE = 2;                       // versión de formato que entiende esta app (se anuncia dentro de cada mensaje)
   const TAG_PREFIX = 'susurro:';        // etiqueta #p = sha256(TAG_PREFIX + huella del destinatario)
   const SUB_ID = 'susurro';
   const BACKFILL_ID = 'susurro-old';    // suscripción auxiliar para pedir históricos que no cupieron
@@ -29,6 +31,10 @@
   const SUB_LIMIT = 500;                // eventos por petición a un relay
   const MAX_PAGES = 20;                 // páginas de histórico que se piden como mucho
   const SINCE_MARGIN = 2 * 86400;       // al reconectar se vuelven a pedir los últimos 2 días
+  const BACKDATE = SINCE_MARGIN - 3600; // la fecha visible de un mensaje camuflado se adelanta al azar hasta ~2 días (NIP-59)
+  const MAX_V2_INNER = 65535;           // límite del cifrado NIP-44 estándar; si no cabe, va en formato clásico
+  const V2_PROBE_OK = 3 * 86400;        // cada cuánto se vuelve a comprobar que un relay admite el formato camuflado
+  const V2_PROBE_NO = 86400;            // …y cada cuánto se reintenta uno que no lo admitía
   const RESIGN_AFTER = 3600;            // un pendiente más antiguo se vuelve a firmar al publicarlo
   const RELAY_TTL = 7 * 86400;          // los relays borran los mensajes cifrados a los 7 días (NIP-40)
   const TIMERS = [[0, 'Desactivados'], [300, '5 minutos'], [3600, '1 hora'], [86400, '1 día'], [604800, '1 semana']];
@@ -41,6 +47,17 @@
   const IDLE_LOCK_MS = 15 * 60 * 1000;  // o tras 15 minutos abierta sin usarla
   const ARGON2_LIMITS = { maxArgon2MemoryExponent: 17 }; // como mucho 128 MiB al abrir datos ajenos
   const VAULT_AAD = new TextEncoder().encode('susurro:vault:v2');
+  // Modo Tor. Una dirección .onion solo se puede abrir a través de Tor (los navegadores normales ni siquiera
+  // la resuelven), así que conseguir abrir una demuestra que el navegador va por Tor, sin preguntar a terceros.
+  // Direcciones .onion de los relays recomendados que las publican (mismo relay, otra vía de acceso).
+  const ONION = {
+    'wss://nostr.oxtr.dev': 'ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion',
+  };
+  const TOR_PROBES = [
+    'http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/', // torproject.org
+  ];
+  const TOR_FRESH = 10 * 60 * 1000;     // una comprobación de Tor vale 10 minutos
+  const TOR_WAIT = 30000;               // tiempo máximo de una comprobación (los circuitos tardan en montarse)
 
   const isTouch = matchMedia('(pointer: coarse)').matches;
   const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -79,7 +96,12 @@
   let seen = new Set();
   let subTags = [];             // etiquetas que escucho: la pública y las secretas de cada chat
   let myTags = new Set();
+  let subTags2 = [];            // las mismas en formato camuflado (con forma de clave pública Nostr)
+  let myTags2 = new Map();      // etiqueta camuflada → su clave privada, que descifra la capa NIP-44
   let tagDay = 0;
+  let torAt = 0;                // última vez que se comprobó que hay Tor
+  let torCheck = null;          // comprobación de Tor en curso
+  let torFailed = false;
   const keyCache = new Map();
   const evSeen = new Set();
   const inflight = new Set();
@@ -118,6 +140,14 @@
       return Uint8Array.from(s, (c) => c.charCodeAt(0));
     },
   };
+  // Base64 estándar (con relleno), el que usan los clientes Nostr dentro de NIP-44.
+  const b64 = {
+    enc: (bytes) => b64u.enc(bytes).replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((3 - (bytes.length % 3)) % 3),
+    dec: (str) => {
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(str)) throw new Error('base64 no válido');
+      return b64u.dec(str.replace(/=+$/, ''));
+    },
+  };
 
   async function sha256hex(str) {
     const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -133,18 +163,34 @@
   const newSecret = () => b64u.enc(crypto.getRandomValues(new Uint8Array(32)));
   const isSecret = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{43}$/.test(s);
   const hmacKeys = new Map(), tagCache = new Map();
+  async function pairHmac(secret, label) {
+    let k = hmacKeys.get(secret);
+    if (!k) {
+      k = await crypto.subtle.importKey('raw', b64u.dec(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      hmacKeys.set(secret, k);
+    }
+    return new Uint8Array(await crypto.subtle.sign('HMAC', k, new TextEncoder().encode(label)));
+  }
   async function pairTag(secret, day) {
     const id = secret + ':' + day;
     if (!tagCache.has(id)) {
-      let k = hmacKeys.get(secret);
-      if (!k) {
-        k = await crypto.subtle.importKey('raw', b64u.dec(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-        hmacKeys.set(secret, k);
-      }
-      const sig = await crypto.subtle.sign('HMAC', k, new TextEncoder().encode('susurro-tag:' + day));
-      tagCache.set(id, Array.from(new Uint8Array(sig), (b) => b.toString(16).padStart(2, '0')).join(''));
+      const sig = await pairHmac(secret, 'susurro-tag:' + day);
+      tagCache.set(id, Array.from(sig, (b) => b.toString(16).padStart(2, '0')).join(''));
     }
     return tagCache.get(id);
+  }
+
+  // Formato camuflado: la etiqueta es una clave pública Nostr de verdad, distinta cada día, cuya clave
+  // privada solo conocen los dos del chat (sale del mismo secreto). Para cualquier otro es un usuario de
+  // Nostr más recibiendo mensajes privados; esa clave privada descifra la capa NIP-44 que envuelve el PGP.
+  const tag2Cache = new Map();
+  async function pairTag2(secret, day) {
+    const id = secret + ':' + day;
+    if (!tag2Cache.has(id)) {
+      const sk = await pairHmac(secret, 'susurro-tag2:' + day);
+      tag2Cache.set(id, { sk, tag: NostrTools.getPublicKey(sk) });
+    }
+    return tag2Cache.get(id);
   }
 
   // Aleatoriedad criptográfica para elegir relays y esperas.
@@ -278,6 +324,9 @@
   const freshState = () => ({
     me: null, contacts: {}, msgs: {}, seen: [], seenFloor: {},
     relays: DEFAULT_RELAYS.slice(), relayMode: 'default', since: 0, relaySince: {}, ui: {},
+    net: 'direct',  // 'direct' o 'tor' (solo conecta si comprueba que va por Tor)
+    relayV2: {},    // url → { ok, at, lastOk }: si el relay admite el formato camuflado
+    relaySince2: {}, // como relaySince, pero del formato camuflado
   });
 
   function normalizeState(s) {
@@ -285,6 +334,9 @@
     if (!s.seenFloor || typeof s.seenFloor !== 'object' || Array.isArray(s.seenFloor)) s.seenFloor = {};
     if (!Array.isArray(s.seen)) s.seen = [];
     if (!s.relaySince || typeof s.relaySince !== 'object') s.relaySince = {};
+    if (!s.relayV2 || typeof s.relayV2 !== 'object' || Array.isArray(s.relayV2)) s.relayV2 = {};
+    if (!s.relaySince2 || typeof s.relaySince2 !== 'object' || Array.isArray(s.relaySince2)) s.relaySince2 = {};
+    if (s.net !== 'tor') s.net = 'direct';
     // Modo de relays: los recomendados siguen siempre la lista de la versión actual de la app; una lista
     // propia se respeta tal cual. Quien venía de una versión sin modo y no la había tocado, recomendados.
     if (s.relayMode !== 'custom' && s.relayMode !== 'default') {
@@ -447,6 +499,7 @@
   // Contenido cifrado: JSON firmado con mi clave y cifrado para el destinatario.
   // Incluye mi clave pública para que pueda responderme aunque aún no me tenga
   // y su propia huella en `to` para que nadie pueda reenviarle a otro un mensaje firmado por mí.
+  // Devuelve el mensaje PGP en binario: se envuelve después en el formato de envío que toque.
   async function encryptFor(c, payload) {
     // Relleno en bytes hasta múltiplos de PAD_BLOCK para no delatar la longitud del texto.
     const enc = new TextEncoder();
@@ -457,13 +510,19 @@
       encryptionKeys: await contactKey(c),
       signingKeys: myPriv,
       wildcard: true, // no revela el ID de la clave del destinatario
+      format: 'binary',
     });
   }
 
-  async function openEvent(ev) {
+  // Formato clásico: PGP en ASCII armor. Camuflado (sk = clave privada de la etiqueta): NIP-44 con la clave
+  // efímera del evento, y dentro el PGP en base64, igual que un mensaje privado de cualquier cliente Nostr.
+  async function openEvent(ev, sk) {
     if (typeof ev.content !== 'string' || ev.content.length > MAX_EVENT_CHARS) return null;
     const config = { maxDecompressedMessageSize: MAX_DECOMPRESSED };
-    const read = () => openpgp.readMessage({ armoredMessage: ev.content });
+    const src = sk
+      ? { binaryMessage: b64.dec(NostrTools.nip44.v2.decrypt(ev.content, NostrTools.nip44.v2.utils.getConversationKey(sk, ev.pubkey))) }
+      : { armoredMessage: ev.content };
+    const read = () => openpgp.readMessage(src);
     const msg = await read();
     // Exactamente un destinatario: con varios, cada uno obligaría a una operación de descifrado.
     const P = openpgp.enums.packet;
@@ -479,8 +538,13 @@
     p.ttl = p.ttl ?? 0;
     if (!TTLS.has(p.ttl)) return null;
     // Secreto con el que debo escribirle (rk) y relays donde escucha (rl). Opcionales: versiones antiguas no los mandan.
+    // w: versión de formato que entiende; r2: posiciones en rl de los relays que admiten el formato camuflado.
     if (p.rk !== undefined && !isSecret(p.rk)) return null;
-    p.rl = Array.isArray(p.rl) ? p.rl.filter((u) => typeof u === 'string' && u.length < 200 && isWss(u)).slice(0, MAX_RELAYS) : [];
+    const rawRl = Array.isArray(p.rl) ? p.rl.slice(0, MAX_RELAYS) : [];
+    const okUrl = (u) => typeof u === 'string' && u.length < 200 && isRelayUrl(u);
+    p.r2 = Array.isArray(p.r2) ? [...new Set(p.r2)].filter((i) => Number.isInteger(i) && i >= 0 && i < rawRl.length).map((i) => rawRl[i]).filter(okUrl) : [];
+    p.rl = rawRl.filter(okUrl);
+    p.w = Number.isInteger(p.w) && p.w > 1 ? Math.min(p.w, WIRE) : 1;
     const senderKey = await openpgp.readKey({ binaryKey: b64u.dec(p.key) });
     if (senderKey.isPrivate()) return null;
     // Segunda pasada: exige una firma válida hecha con la clave que viene dentro.
@@ -493,11 +557,68 @@
     return { p, senderKey };
   }
 
+  // ---------- Tor ----------
+  // En modo Tor ninguna conexión sale hacia una dirección normal hasta comprobar que el navegador va por Tor:
+  // se intenta abrir una dirección .onion (la de torproject.org y las de los relays). Si se abre, hay Tor;
+  // si no hay Tor, la petición ni siquiera sale del navegador, así que comprobarlo no delata nada.
+  const torMode = () => state?.net === 'tor';
+  const isOnion = (u) => { try { return new URL(u).hostname.endsWith('.onion'); } catch { return false; } };
+  const via = (u) => (torMode() && ONION[u]) || u;
+  const netTimeout = (ms) => (torMode() ? ms * 3 : ms); // por Tor todo tarda más
+  const torSeen = () => { torAt = Date.now(); torFailed = false; };
+  const torOk = () => !torMode() || Date.now() - torAt < TOR_FRESH
+    || (!!pool && [...pool.relays.values()].some((r) => r.status === 'open' && isOnion(r.target)));
+
+  function probeFetch(url) {
+    return fetch(url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(TOR_WAIT) })
+      .then(() => true, () => false);
+  }
+
+  function probeSocket(url) {
+    return new Promise((res) => {
+      let ws = null, done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try { ws?.close(); } catch {}
+        res(v);
+      };
+      const timer = setTimeout(() => finish(false), TOR_WAIT);
+      try { ws = new WebSocket(url); } catch { return finish(false); }
+      ws.onopen = () => finish(true);
+      ws.onerror = () => finish(false);
+      ws.onclose = () => finish(false);
+    });
+  }
+
+  // true en cuanto una sonda .onion responde; false si fallan todas.
+  function checkTor() {
+    if (torOk()) return Promise.resolve(true);
+    if (!torCheck) {
+      const onions = [...new Set(state.relays.map(via).filter(isOnion))];
+      const probes = [...TOR_PROBES.map(probeFetch), ...onions.map(probeSocket)];
+      torCheck = new Promise((res) => {
+        let left = probes.length;
+        for (const p of probes) p.then((ok) => { if (ok) res(true); else if (--left === 0) res(false); });
+      }).then((ok) => {
+        torCheck = null;
+        if (ok) torSeen();
+        else torFailed = true;
+        renderNet();
+        return ok;
+      });
+      renderNet();
+    }
+    return torCheck;
+  }
+
   // ---------- Relays Nostr ----------
   class Relay {
     constructor(pool, url) {
       this.pool = pool;
-      this.url = url;
+      this.url = url;       // identidad del relay (la que se anuncia a los contactos)
+      this.target = url;    // dirección a la que se conecta (su .onion en modo Tor, si la tiene)
       this.ws = null;
       this.status = 'off';
       this.retry = 0;
@@ -505,19 +626,31 @@
       this.subTimer = null;
       this.reqAt = 0;
       this.page = null;
+      this.v2 = false;      // la suscripción actual incluye el formato camuflado
       this.closed = false;
     }
     connect() {
       clearTimeout(this.timer);
       if (this.closed || (this.ws && this.ws.readyState <= 1)) return;
+      this.target = via(this.url);
+      // Modo Tor: no se conecta a nada (ni siquiera a una .onion) hasta haber comprobado que hay Tor. Sin Tor
+      // una .onion no se puede abrir, pero algunos navegadores (los de iPhone) mandarían su nombre al DNS
+      // del proveedor de internet en cada reintento: así solo lo hacen las sondas de comprobación.
+      if (torMode() && !torOk()) {
+        this.status = 'off';
+        this.pool.changed();
+        this.pool.needTor();
+        return;
+      }
       this.status = 'connecting';
       this.pool.changed();
       let ws;
-      try { ws = new WebSocket(this.url); } catch { this.status = 'off'; this.pool.changed(); return; }
+      try { ws = new WebSocket(this.target); } catch { this.status = 'off'; this.pool.changed(); return; }
       this.ws = ws;
-      const openTimeout = setTimeout(() => { if (ws.readyState === 0) ws.close(); }, 10000);
+      const openTimeout = setTimeout(() => { if (ws.readyState === 0) ws.close(); }, netTimeout(10000));
       ws.onopen = () => {
         clearTimeout(openTimeout);
+        if (isOnion(this.target)) torSeen();
         this.status = 'open';
         this.retry = 0;
         this.subscribe();
@@ -562,26 +695,32 @@
       this.ws.send(JSON.stringify(msg));
       return true;
     }
+    // Un filtro por formato (clásico y camuflado) en la misma petición.
     subscribe() {
       clearTimeout(this.subTimer);
       this.reqAt = nowSec();
-      this.page = { sub: SUB_ID, got: 0, oldest: Infinity, n: 0 };
-      this.send(['REQ', SUB_ID, this.pool.filter(this.url)]);
+      const filters = this.pool.filter(this.url);
+      this.v2 = filters.some((f) => f.kinds[0] === KIND_V2);
+      this.page = { sub: SUB_ID, filters, got: {}, oldest: {}, n: 0 };
+      this.send(['REQ', SUB_ID, ...filters]);
     }
-    // Un relay entrega como mucho SUB_LIMIT eventos, los más recientes (y algunos relays menos aún).
-    // Mientras una página traiga eventos se pide la anterior, hasta una vacía: solo entonces el histórico
-    // está completo. Así, inundar la etiqueta no oculta los mensajes legítimos más antiguos.
+    // Un relay entrega como mucho SUB_LIMIT eventos por filtro, los más recientes (y algunos relays menos aún).
+    // Mientras un filtro traiga eventos se pide su página anterior, hasta una vacía: solo entonces el histórico
+    // está completo. Así, inundar la etiqueta no oculta los mensajes legítimos más antiguos. Cada filtro se
+    // pagina por su cuenta (por tipo de evento): el más antiguo de uno no sirve de corte para el otro.
     onEose() {
       const pg = this.page;
-      if (pg.got > 0 && Number.isFinite(pg.oldest)) {
+      const more = pg.filters.filter((f) => pg.got[f.kinds[0]] > 0 && Number.isFinite(pg.oldest[f.kinds[0]]));
+      if (more.length) {
         if (pg.n >= MAX_PAGES) { this.endPaging(); return; } // demasiadas páginas: se reintentará al reconectar
-        const until = pg.oldest - 1; // siempre baja, así que acaba en una página vacía
-        Object.assign(pg, { sub: BACKFILL_ID, got: 0, oldest: Infinity, n: pg.n + 1 });
-        this.send(['REQ', BACKFILL_ID, { ...this.pool.filter(this.url), until }]);
+        // siempre baja, así que cada filtro acaba en una página vacía
+        const filters = more.map((f) => ({ ...f, until: pg.oldest[f.kinds[0]] - 1 }));
+        Object.assign(pg, { sub: BACKFILL_ID, filters, got: {}, oldest: {}, n: pg.n + 1 });
+        this.send(['REQ', BACKFILL_ID, ...filters]);
         return;
       }
       this.endPaging();
-      this.pool.onEose(this.url, this.reqAt);
+      this.pool.onEose(this.url, this.reqAt, this.v2);
     }
     endPaging() {
       if (this.page?.sub === BACKFILL_ID) this.send(['CLOSE', BACKFILL_ID]);
@@ -593,15 +732,22 @@
       try { m = JSON.parse(data); } catch { return; }
       if (!Array.isArray(m)) return;
       if (m[0] === 'EVENT' && (m[1] === SUB_ID || m[1] === BACKFILL_ID) && m[2] && typeof m[2] === 'object') {
-        const pg = this.page;
-        if (pg && m[1] === pg.sub) {
-          pg.got++;
-          if (Number.isFinite(m[2].created_at)) pg.oldest = Math.min(pg.oldest, m[2].created_at);
+        const pg = this.page, k = m[2].kind;
+        if (pg && m[1] === pg.sub && (k === KIND || k === KIND_V2)) {
+          pg.got[k] = (pg.got[k] || 0) + 1;
+          if (Number.isFinite(m[2].created_at)) pg.oldest[k] = Math.min(pg.oldest[k] ?? Infinity, m[2].created_at);
         }
         this.pool.onEvent(m[2]);
       } else if (m[0] === 'EOSE' && this.page && m[1] === this.page.sub) {
         this.onEose();
       } else if (m[0] === 'CLOSED' && m[1] === SUB_ID) {
+        // Si pide autenticarse o restringe el acceso por incluir el formato camuflado, se deja de usar con
+        // este relay (y de anunciarlo): así no se pierde también el clásico.
+        if (this.v2 && /^(auth-required|restricted|blocked)/i.test(String(m[2] || ''))) {
+          v2Result(this.url, false, true); // rechazo firme: deja de escucharlo ya (si cambia, vuelve a suscribir sin él)
+          if (this.v2) this.subscribe();
+          return;
+        }
         clearTimeout(this.subTimer);
         this.subTimer = setTimeout(() => this.subscribe(), 60000);
       } else if (m[0] === 'CLOSED' && m[1] === BACKFILL_ID && this.page?.sub === BACKFILL_ID) {
@@ -638,6 +784,20 @@
     resubscribe() {
       for (const r of this.relays.values()) if (r.status === 'open') r.subscribe();
     }
+    // Vuelve a conectar todo (al cambiar entre conexión directa y Tor cambia la dirección de cada relay).
+    reconnect() {
+      for (const r of this.relays.values()) r.restart();
+    }
+    // Modo Tor sin comprobar: se comprueba y, si hay Tor, se conecta; si no, se reintenta en un rato.
+    needTor() {
+      if (this.torWait || !this.relays.size) return;
+      this.torWait = checkTor().then((ok) => {
+        this.torWait = null;
+        clearTimeout(this.torTimer);
+        if (ok) this.wake();
+        else this.torTimer = setTimeout(() => this.needTor(), TOR_WAIT);
+      });
+    }
   }
 
   // Envío por una conexión nueva y aparte, que se cierra al recibir la respuesta: así el relay no
@@ -652,8 +812,9 @@
         try { ws?.close(); } catch {}
         res(v);
       };
-      const timer = setTimeout(() => finish(null), 10000);
-      try { ws = new WebSocket(url); } catch { return finish(null); }
+      const timer = setTimeout(() => finish(null), netTimeout(10000));
+      if (!isOnion(via(url)) && !torOk()) return finish(null); // modo Tor: se comprueba justo antes de abrir
+      try { ws = new WebSocket(via(url)); } catch { return finish(null); }
       ws.onopen = () => ws.send(JSON.stringify(['EVENT', ev]));
       ws.onmessage = (e) => {
         if (typeof e.data !== 'string' || e.data.length > 10000) return;
@@ -672,6 +833,7 @@
   async function publishRandom(ev, { urls, all }) {
     const pick = all ? urls.slice() : shuffle(urls).slice(0, SEND_RELAYS);
     if (!pick.length || !navigator.onLine) return null;
+    if (pick.some((u) => !isOnion(via(u))) && !(await checkTor())) return null; // modo Tor sin Tor: se queda en cola
     await sleep(SEND_DELAY_MS[0] + randInt(SEND_DELAY_MS[1] - SEND_DELAY_MS[0]));
     const results = await Promise.all(pick.map((u) => publishOnce(u, ev)));
     const accepted = results.filter((r) => r === true).length;
@@ -685,7 +847,38 @@
   // mis relays para no perder el mensaje; después, a 3 al azar de los comunes.
   function targetsFor(c) {
     const common = (c.relays || []).filter((u) => state.relays.includes(u));
-    return common.length ? { urls: common, all: false } : { urls: state.relays, all: true };
+    return common.length ? { w: 1, urls: common, all: false } : { w: 1, urls: state.relays, all: true };
+  }
+
+  // Formato camuflado solo si el contacto lo entiende, ya me dio su secreto y comparte conmigo algún relay
+  // que (según comprobó él) lo admite. Si no, el clásico.
+  function routeFor(c) {
+    if (c.wire >= 2 && isSecret(c.outSecret)) {
+      const urls = (c.relays2 || []).filter((u) => state.relays.includes(u));
+      if (urls.length) return { w: 2, urls, all: false };
+    }
+    return targetsFor(c);
+  }
+
+  // ¿Admite este relay el formato camuflado? Se comprueba de verdad (ver probeRelays) y se recuerda.
+  // Para enviar y anunciar solo cuenta la última comprobación. Para escuchar, un relay que lo admitió se sigue
+  // escuchando en formato camuflado mientras puedan quedar mensajes suyos (caducidad + margen), aunque una
+  // comprobación falle: el contacto puede seguir usando lo que le anuncié antes. Solo un rechazo firme
+  // (autenticación obligatoria, acceso restringido) corta la escucha al momento.
+  const v2Ready = (url) => state.relayV2[url]?.ok === true;
+  const v2Listen = (url) => {
+    const r = state.relayV2[url];
+    return r?.ok === true || (Number.isFinite(r?.lastOk) && nowSec() - r.lastOk < RELAY_TTL + SINCE_MARGIN);
+  };
+  function v2Result(url, ok, hard = false) {
+    const prev = state.relayV2[url];
+    const listenBefore = v2Listen(url);
+    state.relayV2[url] = { ok, at: nowSec(), lastOk: ok ? nowSec() : hard ? undefined : prev?.lastOk };
+    save();
+    if (prev?.ok !== ok || listenBefore !== v2Listen(url)) {
+      const r = pool?.relays.get(url);
+      if (r?.status === 'open') r.subscribe();
+    }
   }
 
   // Recalcula las etiquetas que escucho: la pública (para solicitudes nuevas) y, por cada chat,
@@ -703,32 +896,51 @@
     const known = state.relays.map((u) => state.relaySince[u]).filter(Number.isFinite);
     const base = known.length === state.relays.length ? Math.min(...known) : Math.max(state.since, nowSec() - TAG_DAYS * 86400);
     const first = Math.max(dayOf(base - SINCE_MARGIN), today - TAG_DAYS);
-    const tags = [state.me.tag];
+    // Cada chat se escucha en los dos formatos (el contacto usa el camuflado en cuanto puede, pero
+    // una versión antigua o un relay sin soporte le obligan al clásico). Cada formato tiene su tope.
+    const tags = [state.me.tag], tags2 = new Map();
     // Los chats más recientes primero: si se llega al tope, quedan fuera los más antiguos.
     const chats = Object.values(state.contacts)
       .filter((c) => c.status !== 'blocked' && isSecret(c.inSecret) && (c.status !== 'deleted' || nowSec() - c.deletedAt < TAG_DAYS * 86400))
       .sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
     for (const c of chats) {
-      for (let d = today + 1; d >= first && tags.length < MAX_SUB_TAGS; d--) tags.push(await pairTag(c.inSecret, d));
+      for (let d = today + 1; d >= first && tags.length < MAX_SUB_TAGS && tags2.size < MAX_SUB_TAGS; d--) {
+        tags.push(await pairTag(c.inSecret, d));
+        const t = await pairTag2(c.inSecret, d);
+        tags2.set(t.tag, t.sk);
+      }
     }
     if (gen !== tagGen) return; // otra llamada más reciente ya se encarga
-    if (tags.length >= MAX_SUB_TAGS && !tagCapWarned) { tagCapWarned = true; toast('Tienes muchos chats: los más antiguos podrían no recibir mensajes'); }
+    if ((tags.length >= MAX_SUB_TAGS || tags2.size >= MAX_SUB_TAGS) && !tagCapWarned) { tagCapWarned = true; toast('Tienes muchos chats: los más antiguos podrían no recibir mensajes'); }
     tagDay = today;
-    const changed = tags.join() !== subTags.join();
+    const list2 = [...tags2.keys()];
+    const changed = tags.join() !== subTags.join() || list2.join() !== subTags2.join();
     subTags = tags;
     myTags = new Set(tags);
+    subTags2 = list2;
+    myTags2 = tags2;
     if (changed) pool?.resubscribe();
   }
 
-  // Cada relay sigue desde donde terminó su último histórico completo (EOSE), con margen.
+  // Cada relay sigue desde donde terminó su último histórico completo (EOSE), con margen. El margen de
+  // 2 días cubre también la fecha adelantada al azar de los mensajes camuflados (BACKDATE).
+  // El filtro camuflado solo va a los relays que lo admiten: si alguno lo rechazara, cerraría también el clásico.
+  // El formato camuflado lleva su propio punto de avance (relaySince2), que solo se mueve cuando una
+  // suscripción que de verdad lo incluía termina su histórico, y resta además la fecha adelantada (BACKDATE).
   function subscriptionFilter(url) {
-    const base = state.relaySince[url] ?? state.since;
-    return { kinds: [KIND], '#p': subTags.length ? subTags : [state.me.tag], since: Math.max(0, base - SINCE_MARGIN), limit: SUB_LIMIT };
+    const since = Math.max(0, (state.relaySince[url] ?? state.since) - SINCE_MARGIN);
+    const filters = [{ kinds: [KIND], '#p': subTags.length ? subTags : [state.me.tag], since, limit: SUB_LIMIT }];
+    if (subTags2.length && v2Listen(url)) {
+      const since2 = Math.max(0, (state.relaySince2[url] ?? state.since) - SINCE_MARGIN - BACKDATE);
+      filters.push({ kinds: [KIND_V2], '#p': subTags2, since: since2, limit: SUB_LIMIT });
+    }
+    return filters;
   }
 
-  function onEose(url, reqAt) {
+  function onEose(url, reqAt, v2) {
     if (!reqAt || halted) return;
     state.relaySince[url] = Math.max(state.relaySince[url] || 0, reqAt);
+    if (v2) state.relaySince2[url] = Math.max(state.relaySince2[url] || 0, reqAt);
     save();
   }
 
@@ -753,15 +965,21 @@
   }
 
   async function handleEvent(ev) {
-    if (!state?.me || halted || typeof ev.id !== 'string' || evSeen.has(ev.id)) return;
-    if (ev.kind !== KIND || !Array.isArray(ev.tags) || !ev.tags.some((t) => Array.isArray(t) && t[0] === 'p' && myTags.has(t[1]))) return;
+    if (!state?.me || halted || typeof ev.id !== 'string' || evSeen.has(ev.id) || !Array.isArray(ev.tags)) return;
+    const pTags = ev.tags.filter((t) => Array.isArray(t) && t[0] === 'p');
+    let sk = null; // formato camuflado: clave de la etiqueta, que descifra la capa NIP-44
+    if (ev.kind === KIND_V2) {
+      const t = pTags.find((t) => myTags2.has(t[1]));
+      if (!t) return;
+      sk = myTags2.get(t[1]);
+    } else if (ev.kind !== KIND || !pTags.some((t) => myTags.has(t[1]))) return;
     const expiration = ev.tags.find((t) => Array.isArray(t) && t[0] === 'expiration');
     if (expiration && Number(expiration[1]) < nowSec()) return; // NIP-40: ya caducado
     if (!NostrTools.verifyEvent(ev)) return;
     if (evSeen.size > 20000) evSeen.clear();
     evSeen.add(ev.id);
     let res;
-    try { res = await openEvent(ev); } catch { return; }
+    try { res = await openEvent(ev, sk); } catch { return; }
     if (!res) return;
     const { p, senderKey } = res;
     const fpr = senderKey.getFingerprint();
@@ -782,10 +1000,13 @@
       return;
     }
     markSeen(key, ts);
-    // Dónde y cómo escribirle a partir de ahora: su etiqueta secreta y los relays que escucha.
+    // Dónde y cómo escribirle a partir de ahora: su etiqueta secreta, los relays que escucha, si entiende
+    // el formato camuflado y en cuáles de esos relays lo admiten.
     if (p.rk && ts >= (c.routeAt || 0)) {
       c.outSecret = p.rk;
       if (p.rl.length) c.relays = p.rl;
+      c.relays2 = p.r2;
+      c.wire = p.w;
       c.routeAt = ts;
     }
     // El temporizador lo fija quien escribe: cada mensaje lleva el suyo y el chat se sincroniza.
@@ -811,7 +1032,18 @@
   const signEvent = (tags, content) =>
     NostrTools.finalizeEvent({ kind: KIND, created_at: nowSec(), tags, content }, NostrTools.generateSecretKey());
 
-  async function buildEvent(fpr, extra) {
+  // Formato camuflado, igual que el «gift wrap» de los mensajes privados de Nostr (NIP-59): clave efímera,
+  // fecha visible adelantada al azar hasta ~2 días, destinatario = la etiqueta camuflada de hoy y contenido
+  // cifrado con NIP-44 para ella. Dentro va el mismo mensaje PGP de siempre.
+  function signEvent2(tag, expiration, inner, created = nowSec() - randInt(BACKDATE + 1)) {
+    const eph = NostrTools.generateSecretKey();
+    const content = NostrTools.nip44.v2.encrypt(inner, NostrTools.nip44.v2.utils.getConversationKey(eph, tag));
+    return NostrTools.finalizeEvent({ kind: KIND_V2, created_at: created, tags: [['p', tag], ['expiration', expiration]], content }, eph);
+  }
+
+  // El mensaje se cifra una vez (PGP) y se guarda así hasta que sale: el formato de envío se decide al
+  // publicar, con lo que se sepa entonces del contacto, y se puede volver a envolver sin volver a cifrar.
+  async function buildMessage(fpr, extra) {
     const c = state.contacts[fpr];
     // Mi secreto para este chat: se lo doy en cada mensaje para que me conteste por etiquetas secretas.
     if (!isSecret(c.inSecret)) {
@@ -819,22 +1051,49 @@
       await refreshTags(); // escucho ya la etiqueta nueva antes de que pueda contestar
     }
     const ttl = c.ttl || 0;
+    const rl = state.relays.slice(0, MAX_RELAYS);
     const payload = {
       v: 1, id: crypto.randomUUID(), ts: Date.now(), to: fpr, key: myPubB64, text: '', ttl,
-      rk: c.inSecret, rl: state.relays.slice(0, MAX_RELAYS), ...extra,
+      rk: c.inSecret, rl, w: WIRE, r2: rl.flatMap((u, i) => (v2Ready(u) ? [i] : [])), ...extra,
     };
-    // Su etiqueta secreta de hoy si ya me la dio; si no (primer mensaje), su etiqueta pública.
-    const tag = isSecret(c.outSecret) ? await pairTag(c.outSecret, dayOf(nowSec())) : await tagFor(fpr);
-    // NIP-40: los relays borran el evento al caducar (el tiempo del temporizador o RELAY_TTL).
-    const tags = [['p', tag], ['expiration', String(nowSec() + (ttl || RELAY_TTL))]];
-    return { payload, ttl, ev: signEvent(tags, await encryptFor(c, payload)) };
+    return { payload, ttl, pgp: b64u.enc(await encryptFor(c, payload)) };
+  }
+
+  // Evento listo para publicar en el formato pedido. Se reutiliza el ya firmado mientras sea reciente y del
+  // mismo formato (los relays lo deduplican). Si no, se firma de nuevo con fecha actual para que entre en el
+  // filtro del destinatario, con la etiqueta de hoy (la de un día antiguo puede quedar fuera de lo que
+  // escucha) y la caducidad NIP-40: la del temporizador o, si no es temporal, RELAY_TTL renovado.
+  async function eventFor(c, m, w) {
+    const at = m.at ?? m.ev?.created_at;
+    if (m.ev && Number.isFinite(at) && nowSec() - at <= RESIGN_AFTER && (m.ev.kind === KIND_V2) === (w === 2)) return m.ev;
+    // Con un margen aleatorio: si fuera exacta, restando el tiempo fijo se sabría la hora real de envío
+    // (y se anularía la fecha adelantada del formato camuflado).
+    const expiration = String(m.exp ? Math.ceil(m.exp / 1000) + randInt(600) : nowSec() + (m.xp || RELAY_TTL) + randInt(m.xp ? 600 : 86400));
+    if (!m.pgp) {
+      // Pendiente de una versión anterior: solo está el evento clásico, ya cifrado.
+      const pTag = isSecret(c.outSecret) ? await pairTag(c.outSecret, dayOf(nowSec())) : null;
+      const tags = m.ev.tags.map((t) => {
+        if (t[0] === 'expiration' && !m.exp) return ['expiration', String(nowSec() + RELAY_TTL + randInt(86400))];
+        if (t[0] === 'p' && pTag) return ['p', pTag];
+        return t;
+      });
+      m.ev = signEvent(tags, m.ev.content);
+    } else if (w === 2) {
+      m.ev = signEvent2((await pairTag2(c.outSecret, dayOf(nowSec()))).tag, expiration, b64.enc(b64u.dec(m.pgp)));
+    } else {
+      // Su etiqueta secreta de hoy si ya me la dio; si no (primer mensaje), su etiqueta pública.
+      const tag = isSecret(c.outSecret) ? await pairTag(c.outSecret, dayOf(nowSec())) : await tagFor(c.fpr);
+      m.ev = signEvent([['p', tag], ['expiration', expiration]], openpgp.armor(openpgp.enums.armor.message, b64u.dec(m.pgp)));
+    }
+    m.at = nowSec();
+    return m.ev;
   }
 
   async function sendMessage(fpr, text) {
     const c = state.contacts[fpr];
     if (c.status !== 'ok') { c.status = 'ok'; renderRequest(); } // responder acepta la solicitud
-    const { payload, ttl, ev } = await buildEvent(fpr, { text });
-    const m = { id: payload.id, dir: 'out', text, ts: payload.ts, st: 'sending', ev, exp: ttl ? payload.ts + ttl * 1000 : 0 };
+    const { payload, ttl, pgp } = await buildMessage(fpr, { text });
+    const m = { id: payload.id, dir: 'out', text, ts: payload.ts, st: 'sending', pgp, exp: ttl ? payload.ts + ttl * 1000 : 0 };
     addMessage(fpr, m);
     save(true);
     renderList();
@@ -847,9 +1106,10 @@
     if ((c.ttl || 0) === ttl) return;
     c.ttl = ttl;
     // Aviso de control cifrado para que el otro lado use el mismo temporizador.
-    const { payload, ev } = await buildEvent(fpr, { t: 'timer' });
+    const { payload, pgp } = await buildMessage(fpr, { t: 'timer' });
     c.ttlAt = payload.ts;
-    const m = sysMsg(timerText('Has', ttl), payload.ts, { id: payload.id, st: 'sending', ev });
+    // xp: el aviso caduca en los relays con el temporizador nuevo.
+    const m = sysMsg(timerText('Has', ttl), payload.ts, { id: payload.id, st: 'sending', pgp, xp: ttl || undefined });
     addMessage(fpr, m);
     save(true);
     renderChatHeader();
@@ -860,26 +1120,19 @@
 
   function publishMsg(fpr, m) {
     const c = state.contacts[fpr];
-    if (!pool || !m.ev || !c || inflight.has(m.id)) return;
-    // Un pendiente antiguo se firma de nuevo con fecha actual para que entre en el filtro del destinatario.
-    // Si no es temporal, también se renueva su caducidad (los temporales conservan la suya).
-    // La etiqueta secreta también se recalcula para hoy (la de un día antiguo puede quedar fuera de lo que escucha).
+    if (!pool || !(m.pgp || m.ev) || !c || inflight.has(m.id)) return;
     inflight.add(m.id);
     (async () => {
-      if (!Number.isFinite(m.ev.created_at) || nowSec() - m.ev.created_at > RESIGN_AFTER) {
-        const pTag = isSecret(c.outSecret) ? await pairTag(c.outSecret, dayOf(nowSec())) : null;
-        const tags = m.ev.tags.map((t) => {
-          if (t[0] === 'expiration' && !m.exp) return ['expiration', String(nowSec() + RELAY_TTL)];
-          if (t[0] === 'p' && pTag) return ['p', pTag];
-          return t;
-        });
-        m.ev = signEvent(tags, m.ev.content);
-      }
-      return publishRandom(m.ev, targetsFor(c));
+      let route = m.pgp ? routeFor(c) : targetsFor(c);
+      if (route.w === 2 && m.pgp.length + 4 > MAX_V2_INNER) route = targetsFor(c); // no cabe en NIP-44
+      let ok = await publishRandom(await eventFor(c, m, route.w), route);
+      // Si todos rechazan el camuflado (un relay que cambió sus normas, por ejemplo), sale en clásico.
+      if (ok === false && route.w === 2) ok = await publishRandom(await eventFor(c, m, 1), targetsFor(c));
+      return ok;
     })().catch(() => null).then((ok) => {
       inflight.delete(m.id);
       if (m.st === 'sent') return;
-      if (ok === true) { m.st = 'sent'; delete m.ev; }
+      if (ok === true) { m.st = 'sent'; for (const k of ['ev', 'pgp', 'at', 'xp']) delete m[k]; }
       else if (ok === false) m.st = 'failed';
       save();
       if (current === fpr) updateMsg(m);
@@ -890,12 +1143,12 @@
   function flushOutbox() {
     if (halted) return;
     for (const [fpr, list] of Object.entries(state.msgs)) {
-      for (const m of list) if (m.dir !== 'in' && m.st === 'sending' && m.ev) publishMsg(fpr, m);
+      for (const m of list) if (m.dir !== 'in' && m.st === 'sending' && (m.pgp || m.ev)) publishMsg(fpr, m);
     }
   }
 
   function retry(fpr, m) {
-    if (!m.ev) return;
+    if (!(m.pgp || m.ev)) return;
     m.st = 'sending';
     updateMsg(m);
     publishMsg(fpr, m);
@@ -971,9 +1224,43 @@
     if (!pool) return;
     const { open, total } = pool.counts();
     const el = $('#net');
-    el.className = 'net ' + (open ? 'on' : navigator.onLine ? 'wait' : 'off');
-    el.lastElementChild.textContent = open ? `Conectado · ${open}/${total} relays` : navigator.onLine ? 'Conectando…' : 'Sin conexión';
-    if ($('#dlg-settings').open) renderRelayStatus();
+    const tor = torMode(), noTor = tor && !open && !torOk();
+    const failed = noTor && torFailed && !torCheck;
+    el.className = 'net ' + (open ? 'on' : failed || !navigator.onLine ? 'off' : 'wait');
+    el.lastElementChild.textContent = open ? `${tor ? 'Tor · ' : ''}Conectado · ${open}/${total} relays`
+      : !navigator.onLine ? 'Sin conexión'
+      : noTor ? (torCheck ? 'Comprobando Tor…' : failed ? 'Sin Tor: no se conecta' : 'Esperando a Tor…')
+      : 'Conectando…';
+    if ($('#dlg-settings').open) { renderRelayStatus(); renderTorStatus(); }
+  }
+
+  function renderTorStatus() {
+    const tor = torMode(), st = $('#tor-status');
+    st.hidden = $('#btn-tor-check').hidden = !tor;
+    if (!tor) return;
+    const ok = torOk();
+    st.className = 'fine left' + (!ok && torFailed && !torCheck ? ' warn' : '');
+    st.textContent = torCheck ? 'Comprobando Tor…'
+      : ok ? 'Tor funciona: todas las conexiones salen por Tor.'
+      : torFailed ? 'No se detecta Tor: Susurro no se conectará a nada hasta que lo haya. Ábrela en Tor Browser (nivel de seguridad «Estándar»).'
+      : 'Pendiente de comprobar Tor.';
+  }
+
+  // Cambiar de modo vuelve a conectar todo: en modo Tor, solo tras comprobar que hay Tor.
+  function setNetMode(mode) {
+    if (state.net === mode) return;
+    if (mode === 'direct' && !confirm('Sin Tor, los relays verán tu dirección IP. ¿Pasar a conexión directa?')) {
+      for (const r of document.querySelectorAll('input[name="net-mode"]')) r.checked = r.value === state.net;
+      return;
+    }
+    state.net = mode;
+    torAt = 0;
+    torFailed = false;
+    save();
+    pool.reconnect();
+    renderNet();
+    renderTorStatus();
+    toast(mode === 'tor' ? 'Modo Tor: solo se conecta a través de Tor' : 'Conexión directa');
   }
 
   // ---------- Interfaz: conversación ----------
@@ -1301,19 +1588,24 @@
     $('#set-name').textContent = state.me.name;
     $('#set-fpr').textContent = fmtFpr(state.me.fpr);
     showRelayMode(state.relayMode);
+    for (const r of document.querySelectorAll('input[name="net-mode"]')) r.checked = r.value === state.net;
     for (const id of ['#in-backup-pass', '#in-pass-old', '#in-pass-new', '#in-pass-new2']) $(id).value = '';
     $('#in-backup-pass').type = 'password';
     renderRelayStatus();
+    renderTorStatus();
     openDialog('#dlg-settings');
   }
 
   function renderRelayStatus() {
-    const label = { open: 'conectado', connecting: 'conectando…', off: 'sin conexión' };
+    const label = { open: 'conectado', connecting: 'conectando…', off: torMode() && !torOk() ? 'esperando a Tor' : 'sin conexión' };
     $('#relay-status').replaceChildren(...[...pool.relays.values()].map((r) =>
-      h('li', { class: r.status }, h('i'), `${r.url} · ${label[r.status]}`)));
+      h('li', { class: r.status }, h('i'), `${r.url}${r.target !== r.url ? ' (vía .onion)' : ''} · ${label[r.status]}${v2Ready(r.url) ? ' · camuflado' : ''}`)));
   }
 
-  const isWss = (u) => { try { return new URL(u).protocol === 'wss:'; } catch { return false; } };
+  // wss:// siempre; ws:// (sin TLS) solo hacia direcciones .onion, que Tor ya cifra y autentica de extremo a extremo.
+  const isRelayUrl = (u) => {
+    try { const x = new URL(u); return x.protocol === 'wss:' || (x.protocol === 'ws:' && x.hostname.endsWith('.onion')); } catch { return false; }
+  };
 
   // ---------- Relays: recomendados o lista propia ----------
   function showRelayMode(mode) {
@@ -1326,43 +1618,66 @@
 
   function readRelayList() {
     const list = [...new Set($('#in-relays').value.split(/\s+/).map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean))];
-    const bad = list.find((u) => !isWss(u));
-    if (bad) throw new Error(`Dirección no válida: ${bad} (debe empezar por wss://)`);
+    const bad = list.find((u) => !isRelayUrl(u));
+    if (bad) throw new Error(`Dirección no válida: ${bad} (debe empezar por wss://, o por ws:// si es .onion)`);
     if (!list.length) throw new Error('Necesitas al menos un relay');
     if (list.length > MAX_RELAYS) throw new Error(`Como mucho ${MAX_RELAYS} relays`);
     return list;
   }
 
-  // Prueba real: publica un evento de Susurro que caduca en 60 s y comprueba que el relay lo acepta
-  // y lo devuelve al pedirlo. Si no, ese relay no sirve para Susurro (o rechaza este tipo de eventos).
-  function testRelay(url) {
-    const randomTag = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
-    const ev = signEvent([['p', randomTag], ['expiration', String(nowSec() + 60)]], b64u.enc(crypto.getRandomValues(new Uint8Array(24))));
+  // Prueba real: publica un evento de prueba que caduca en 60 s y comprueba que el relay lo acepta y lo
+  // devuelve al pedirlo. Clásico: un evento de Susurro. Camuflado (v2): uno con forma de mensaje privado de
+  // Nostr, con la fecha adelantada al máximo, pedido después igual que en la suscripción real (por destinatario):
+  // así se detectan los relays que rechazan fechas antiguas o que solo dejan leer esos mensajes tras autenticarse.
+  // sure: el relay respondió (si no, no se sabe y se volverá a probar).
+  async function testRelay(url, v2 = false) {
+    const target = via(url);
+    if (!isOnion(target) && !(await checkTor())) return { ok: false, why: 'sin Tor no se prueba', sure: false };
+    const expiration = String(nowSec() + 60);
+    let ev, filter;
+    if (v2) {
+      const tag = NostrTools.getPublicKey(NostrTools.generateSecretKey());
+      ev = signEvent2(tag, expiration, b64.enc(crypto.getRandomValues(new Uint8Array(1200))), nowSec() - BACKDATE);
+      filter = { kinds: [KIND_V2], '#p': [tag], limit: 1 };
+    } else {
+      const randomTag = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
+      ev = signEvent([['p', randomTag], ['expiration', expiration]], b64u.enc(crypto.getRandomValues(new Uint8Array(24))));
+      filter = { ids: [ev.id] };
+    }
     return new Promise((res) => {
       let ws = null, done = false;
-      const finish = (ok, why) => {
+      const finish = (ok, why, sure = true) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         try { ws?.close(); } catch {}
-        res({ ok, why });
+        res({ ok, why, sure });
       };
-      const timer = setTimeout(() => finish(false, 'no responde'), 9000);
-      try { ws = new WebSocket(url); } catch { return finish(false, 'dirección no válida'); }
-      ws.onopen = () => ws.send(JSON.stringify(['EVENT', ev]));
+      const timer = setTimeout(() => finish(false, 'no responde', false), netTimeout(9000));
+      if (!isOnion(target) && !torOk()) return finish(false, 'sin Tor no se prueba', false);
+      try { ws = new WebSocket(target); } catch { return finish(false, 'dirección no válida'); }
+      ws.onopen = () => {
+        if (isOnion(target)) torSeen();
+        ws.send(JSON.stringify(['EVENT', ev]));
+      };
       ws.onmessage = (e) => {
-        if (typeof e.data !== 'string' || e.data.length > 10000) return;
+        if (typeof e.data !== 'string' || e.data.length > 20000) return;
         let m;
         try { m = JSON.parse(e.data); } catch { return; }
         if (!Array.isArray(m)) return;
         if (m[0] === 'OK' && m[1] === ev.id) {
-          if (m[2] !== true) return finish(false, String(m[3] || 'rechaza los mensajes').slice(0, 60));
-          ws.send(JSON.stringify(['REQ', 'prueba', { ids: [ev.id] }]));
+          if (m[2] !== true) {
+            // Solo un rechazo firme es seguro; un límite de ritmo o un error pasajero se vuelve a probar.
+            const why = String(m[3] || 'rechaza los mensajes');
+            return finish(false, why.slice(0, 60), /^(blocked|restricted|auth-required|invalid|pow)/i.test(why) || !m[3]);
+          }
+          ws.send(JSON.stringify(['REQ', 'prueba', filter]));
         } else if (m[0] === 'EVENT' && m[2]?.id === ev.id) finish(true);
         else if (m[0] === 'EOSE') finish(false, 'acepta pero no devuelve los mensajes');
+        else if (m[0] === 'CLOSED' && m[1] === 'prueba') finish(false, String(m[2] || 'no deja leer').slice(0, 60));
       };
-      ws.onerror = () => finish(false, 'no se puede conectar');
-      ws.onclose = () => finish(false, 'cierra la conexión');
+      ws.onerror = () => finish(false, 'no se puede conectar', false);
+      ws.onclose = () => finish(false, 'cierra la conexión', false);
     });
   }
 
@@ -1371,10 +1686,36 @@
     try { list = readRelayList(); } catch (e) { toast(e.message); return null; }
     const ul = $('#relay-status');
     ul.replaceChildren(...list.map((u) => h('li', { class: 'connecting' }, h('i'), `${u} · probando…`)));
-    const results = await Promise.all(list.map(testRelay));
+    const results = await Promise.all(list.map(async (u) => {
+      const r = await testRelay(u);
+      if (!r.ok) return r;
+      const r2 = await testRelay(u, true);
+      if (r2.sure) v2Result(u, r2.ok);
+      return { ...r, v2: r2.ok };
+    }));
     ul.replaceChildren(...list.map((u, i) => h('li', { class: results[i].ok ? 'ok' : 'bad' }, h('i'),
-      `${u} · ${results[i].ok ? 'funciona' : results[i].why}`)));
+      `${u} · ${!results[i].ok ? results[i].why : results[i].v2 ? 'funciona, también camuflado' : 'funciona (sin camuflaje)'}`)));
     return list.filter((u, i) => results[i].ok);
+  }
+
+  // En segundo plano, de uno en uno y con pausas al azar, se comprueba qué relays de mi lista admiten el
+  // formato camuflado. Solo esos se anuncian a los contactos y solo en esos se escucha ese formato.
+  let probing = false;
+  async function probeRelays() {
+    if (probing || halted || !unlocked) return;
+    probing = true;
+    try {
+      for (const url of shuffle(state.relays)) {
+        const r = state.relayV2[url];
+        if (r && nowSec() - r.at < (r.ok ? V2_PROBE_OK : V2_PROBE_NO)) continue;
+        await sleep(2000 + randInt(15000));
+        if (halted || !unlocked || !state.relays.includes(url)) break;
+        const res = await testRelay(url, true);
+        if (res.sure) v2Result(url, res.ok);
+      }
+    } finally {
+      probing = false;
+    }
   }
 
   async function saveRelays() {
@@ -1414,12 +1755,12 @@
   }
 
   async function makeBackup(pass) {
-    const { me, contacts, relays, relayMode, since, relaySince, seenFloor } = state;
+    const { me, contacts, relays, relayMode, since, relaySince, relaySince2, relayV2, seenFloor, net } = state;
     // Los mensajes temporales no se copian (deben desaparecer), ni la lista de vistos, que delataría
     // cuándo los hubo: al restaurar se reconstruye a partir de los mensajes copiados.
     const msgs = {};
     for (const [fpr, list] of Object.entries(state.msgs)) msgs[fpr] = list.filter((m) => !m.exp);
-    const data = { app: 'susurro', v: 1, me, contacts, msgs, relays, relayMode, since, relaySince, seenFloor };
+    const data = { app: 'susurro', v: 1, me, contacts, msgs, relays, relayMode, since, relaySince, relaySince2, relayV2, seenFloor, net };
     const armored = await openpgp.encrypt({
       message: await openpgp.createMessage({ text: JSON.stringify(data) }),
       passwords: [pass],
@@ -1447,7 +1788,9 @@
           pub: c.pub,
           inSecret: isSecret(c.inSecret) ? c.inSecret : undefined,
           outSecret: isSecret(c.outSecret) ? c.outSecret : undefined,
-          relays: Array.isArray(c.relays) ? c.relays.filter((u) => str(u) && isWss(u)).slice(0, MAX_RELAYS) : [],
+          relays: Array.isArray(c.relays) ? c.relays.filter((u) => str(u) && isRelayUrl(u)).slice(0, MAX_RELAYS) : [],
+          relays2: Array.isArray(c.relays2) ? c.relays2.filter((u) => str(u) && isRelayUrl(u)).slice(0, MAX_RELAYS) : [],
+          wire: Number.isInteger(c.wire) && c.wire > 1 ? Math.min(c.wire, WIRE) : 1,
           routeAt: okTs(c.routeAt) ? c.routeAt : 0,
         }),
       };
@@ -1460,22 +1803,36 @@
         .map((m) => {
           const out = { id: m.id, dir: m.dir, text: m.text.slice(0, MAX_TEXT), ts: m.ts };
           if (m.dir !== 'in') {
-            const ev = m.ev && str(m.ev.content) && Array.isArray(m.ev.tags) ? { content: m.ev.content, tags: m.ev.tags, created_at: 0 } : null;
-            if (ev && (m.st === 'sending' || m.st === 'failed')) { out.st = m.st; out.ev = ev; }
-            else if (m.dir === 'out') out.st = 'sent';
+            // Pendiente: el PGP cifrado (se envuelve de nuevo al publicar) o, de una versión anterior, el evento clásico.
+            const pgp = str(m.pgp) && m.pgp.length <= MAX_EVENT_CHARS && /^[A-Za-z0-9_-]+$/.test(m.pgp) ? m.pgp : null;
+            const ev = m.ev && m.ev.kind !== KIND_V2 && str(m.ev.content) && Array.isArray(m.ev.tags) ? { content: m.ev.content, tags: m.ev.tags, created_at: 0 } : null;
+            if ((pgp || ev) && (m.st === 'sending' || m.st === 'failed')) {
+              out.st = m.st;
+              if (pgp) out.pgp = pgp; else out.ev = ev;
+              if (TTLS.has(m.xp) && m.xp) out.xp = m.xp;
+            } else if (m.dir === 'out') out.st = 'sent';
           }
           return out;
         });
     }
-    const relays = (Array.isArray(data.relays) ? data.relays : []).filter((u) => str(u) && isWss(u));
+    const relays = (Array.isArray(data.relays) ? data.relays : []).filter((u) => str(u) && isRelayUrl(u));
     const relaySince = {};
-    for (const [u, t] of Object.entries(obj(data.relaySince))) if (isWss(u) && okTs(t * 1000)) relaySince[u] = t;
+    for (const [u, t] of Object.entries(obj(data.relaySince))) if (isRelayUrl(u) && okTs(t * 1000)) relaySince[u] = t;
+    const relaySince2 = {};
+    for (const [u, t] of Object.entries(obj(data.relaySince2))) if (isRelayUrl(u) && okTs(t * 1000)) relaySince2[u] = t;
+    // Qué relays admiten el formato camuflado: sin esto, tras restaurar no se escucharía hasta volver a comprobarlo.
+    const relayV2 = {};
+    for (const [u, r] of Object.entries(obj(data.relayV2))) {
+      if (!isRelayUrl(u) || !r || typeof r.ok !== 'boolean' || !okTs(r.at * 1000)) continue;
+      relayV2[u] = { ok: r.ok, at: r.at, lastOk: okTs(r.lastOk * 1000) ? r.lastOk : undefined };
+    }
     const seenFloor = {};
     for (const [f, t] of Object.entries(obj(data.seenFloor))) if (/^[0-9a-f]{40,64}$/.test(f) && okTs(t)) seenFloor[f] = t;
     return {
       ...freshState(),
       me: { name: cleanName(data.me.name), priv: data.me.priv, created: Number(data.me.created) || nowSec() },
-      contacts, msgs, relaySince, seenFloor,
+      contacts, msgs, relaySince, relaySince2, relayV2, seenFloor,
+      net: data.net === 'tor' ? 'tor' : 'direct',
       relayMode: data.relayMode === 'custom' && relays.length ? 'custom' : 'default',
       relays: data.relayMode === 'custom' && relays.length ? relays.slice(0, MAX_RELAYS) : DEFAULT_RELAYS.slice(),
       since: Number(data.since) || nowSec() - 7 * 86400,
@@ -1627,8 +1984,10 @@
         setInterval(flushOutbox, 30000),
         setInterval(sweepExpired, 5000),
         setInterval(() => { if (dayOf(nowSec()) !== tagDay) refreshTags(); }, 60000), // etiquetas del día nuevo
+        setInterval(probeRelays, 3600000),
       ];
     }
+    probeRelays();
     sweepExpired();
     renderList();
     renderNet();
@@ -1873,6 +2232,14 @@
       });
     });
     $('#btn-lock-now').addEventListener('click', lockNow);
+    for (const r of document.querySelectorAll('input[name="net-mode"]')) r.addEventListener('change', () => setNetMode(r.value));
+    $('#btn-tor-check').addEventListener('click', (e) => withBusy(e.currentTarget, 'Comprobando…', async () => {
+      torAt = 0;
+      const ok = await checkTor();
+      renderTorStatus();
+      if (ok) pool.wake();
+      toast(ok ? 'Tor funciona' : 'No se detecta Tor');
+    }));
     $('#btn-relays-save').addEventListener('click', (e) => withBusy(e.currentTarget, 'Probando…', saveRelays));
     $('#btn-relays-test').addEventListener('click', (e) => withBusy(e.currentTarget, 'Probando…', testRelays));
     for (const r of document.querySelectorAll('input[name="relay-mode"]')) {
